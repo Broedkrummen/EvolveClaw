@@ -1,415 +1,223 @@
-<div align="center">
-  <img src="asserts/evolveclaw.png" alt="EvolveClaw Logo" width="500">
+# EvolveClaw
 
-  <h2>A self-evolving, personalized OpenClaw</h2>
-  <h3>The more you use it, the better it understands you.</h3>
-</div>
+An OpenClaw plugin that learns guidelines from completed agent runs using
+[SCOPE](https://github.com/JarvisPei/SCOPE). Tactical guidance stays with its
+session; reusable strategic guidance persists on disk. The next turn receives
+the learned guidance through an additive prompt hook.
 
-<p align="center">
-  <a href="https://github.com/JarvisPei/SCOPE"><img src="https://img.shields.io/badge/Powered_by-SCOPE-red?style=flat-square" alt="SCOPE" /></a>
-  <a href="https://github.com/openclaw/openclaw"><img src="https://img.shields.io/badge/Built_for-OpenClaw-blue?style=flat-square" alt="OpenClaw" /></a>
-  <a href="https://clawhub.ai"><img src="https://img.shields.io/badge/Available_on-ClawHub-purple?style=flat-square" alt="ClawHub" /></a>
-  <img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License: MIT">
-</p>
+Version 0.2.0 repairs compatibility with **OpenClaw 2026.10.2** and preserves
+the existing learning pipeline, assistant-specific prompts/domains, both
+injection modes, model configuration, automatic sidecar setup, and statistics.
+It does not implement the paper's parallel perspectives or Best-of-N synthesis.
+Those are separate future features.
 
-<table align="center">
-<tr>
-<td align="center"><b>Demo 1: Code Preference</b><br><sub>Agent learns to always use TypeScript</sub></td>
-<td align="center"><b>Demo 2: Workflow Convention</b><br><sub>Agent learns to always write tests</sub></td>
-</tr>
-<tr>
-<td><video src="https://github.com/user-attachments/assets/fccc12df-a231-4d98-bc32-a3e7124560c4" controls width="400"></video></td>
-<td><video src="https://github.com/user-attachments/assets/f9fefc49-eae1-4c06-8821-99cc981fb457" controls width="400"></video></td>
-</tr>
-</table>
+The plugin already existed before this change. Its older integration could
+appear loaded while conversation hooks were blocked, collect obsolete event
+fields, mix concurrent sessions, or eventually stop accepting guidelines.
+See [the investigation and research assessment](docs/research-assessment.md)
+and [migration details](docs/migration.md).
 
----
+## Requirements
 
-## 📰 News
+- OpenClaw 2026.10.2. This is the host version used for build and runtime tests;
+  newer experimental SDK versions need their own compatibility verification.
+- Node 24.16+ on the Node 24 line, or Node 26.1+.
+- Python 3.10+ with `venv` and `pip`; Python 3.12 was tested. On Debian/Ubuntu,
+  a Python installation without `ensurepip` needs its matching `python3-venv`
+  package before automatic setup can work. An existing configured Python
+  environment can instead be selected through `pythonPath`.
+- An API credential supported by the SCOPE synthesis adapter. OpenClaw OAuth
+  sign-in alone is not a transferable API key for this Python sidecar.
 
-- **[2026/03/24]** 🔥 **Fully automatic setup** — The plugin auto-starts the SCOPE server, auto-detects OpenClaw's model configuration, and auto-installs Python dependencies on first launch. No `.env`, no manual setup needed!
-- **[2026/03/24]** 🔥 Added **custom SCOPE prompts & domains** tailored for personal AI assistants — user preference learning, code quality analysis, and communication style optimization!
-- **[2026/03/23]** 🚀 **EvolveClaw v1 released!** Self-evolving prompt system for OpenClaw with zero code modification — plugin + sidecar architecture powered by [SCOPE](https://github.com/JarvisPei/SCOPE).
+## Install the reviewed source
 
----
-
-EvolveClaw turns [OpenClaw](https://github.com/openclaw/openclaw) into a **self-improving agent** that continuously adapts to *your* workflows. Powered by [SCOPE](https://github.com/JarvisPei/SCOPE) (Self-evolving Context Optimization via Prompt Evolution), it observes how you interact with the agent — your tasks, your tool usage patterns, your preferences — and **automatically evolves the system prompt** with personalized guidelines that make the agent increasingly effective for *you*, not just any user.
-
-No two EvolveClaw instances are the same. Over time, each one develops a unique personality shaped by its owner's habits.
-
-**Key adaptation**: SCOPE was originally designed for task-specific benchmarks (e.g., HLE). EvolveClaw extends it with **custom prompt templates and domain categories** tailored for a personal AI assistant — focusing on user preference learning, task quality, communication style, and workflow patterns instead of domain-specific problem-solving heuristics.
-
-> SCOPE also support agent workflows like [EvoFabric](https://github.com/huawei-noah/noah-research/tree/master/EvoFabric)
-
-## 📝 Contents
-
-- [💡 Why EvolveClaw?](#-why-evolveclaw)
-- [⚙️ How It Works](#️-how-it-works)
-- [🚀 Quick Start](#-quick-start)
-- [🧬 What Makes It Self-Evolving](#-what-makes-it-self-evolving)
-- [🏗️ Architecture](#️-architecture)
-- [🎯 Design Decisions](#-design-decisions)
-- [🔌 API Endpoints](#-api-endpoints)
-- [📖 Citation](#-citation)
-
----
-
-## 💡 Why EvolveClaw?
-
-Today's AI agents ship with a static system prompt — every user gets the same instructions. But users are different: some prefer terse answers, others want detailed explanations; some rely heavily on search tools, others write code directly; some use the agent for coding, others for research or writing.
-
-EvolveClaw closes this gap with three core ideas:
-
-| Principle | What It Means |
-|-----------|--------------|
-| **Self-Evolving** | The agent synthesizes behavioral guidelines from its own execution traces. No manual prompt engineering needed — the system prompt improves itself. |
-| **Personalized** | Guidelines are derived from *your* interactions — your tasks, your tool usage patterns. The agent adapts to how *you* work, not a generic user profile. |
-| **Dual Memory** | Strategic guidelines persist across sessions (your agent's personality); tactical guidelines are ephemeral and auto-clear per task. |
-
-## ⚙️ How It Works
-
-<p align="center">
-  <img src="asserts/framework.png" alt="EvolveClaw Framework" width="700">
-</p>
-
-1. **Observe** — The plugin captures your full interaction trace: model output, tool calls, tool results, errors, and the semantic nature of your task
-2. **Learn** — SCOPE analyzes each trace and synthesizes a guideline if warranted — e.g., *"When this user asks for refactoring, prefer small atomic commits over large rewrites"*
-3. **Classify** — Each guideline is classified as **tactical** (task-specific, ephemeral) or **strategic** (cross-task, persisted to disk as part of your personal memory)
-4. **Inject** — On the next turn, all active guidelines are injected into the system prompt, structured by priority (strategic > tactical)
-5. **Forget** — When you start a new session, tactical guidelines are cleared. The agent remembers *who you are* (strategic), not *what you were doing yesterday* (tactical)
-
-This creates a **virtuous cycle**: the more you use the agent, the better it understands your preferences, and the more personalized its behavior becomes.
-
-## 🚀 Quick Start
-
-### 0. Prerequisites — Install OpenClaw
-
-EvolveClaw requires a running [OpenClaw](https://github.com/openclaw/openclaw) instance. If you don't have one yet:
+Use this checkout or a release containing 0.2.0. An existing npm/ClawHub listing
+may still contain the old implementation until a maintainer publishes the update.
 
 ```bash
-# Requires Node ≥ 22
-npm install -g openclaw@latest
-
-# Run the onboarding wizard (sets up gateway, workspace, channels)
-openclaw onboard --install-daemon
+npm ci --ignore-scripts
+npm run build
+openclaw plugins install --link "$PWD" --force --accept-capabilities
+openclaw config set plugins.entries.evolveclaw.hooks.allowConversationAccess true
+openclaw config set plugins.entries.evolveclaw.hooks.allowPromptInjection true
+openclaw plugins enable evolveclaw
+openclaw plugins inspect evolveclaw --runtime --json
 ```
 
-For more details, see [OpenClaw Getting Started](https://docs.openclaw.ai/start/getting-started). You'll also need **Python ≥ 3.10** for the SCOPE sidecar server.
+`./scripts/install-plugin.sh` performs these steps. It explicitly grants
+conversation access because learning needs the prompt, assistant response, and
+execution trace. The grant is host policy under `hooks`, not a plugin `config`
+setting. If `plugins.allow` is configured, EvolveClaw must be included; the
+native installer updates that allowlist.
 
-### 1. Install the Plugin
+OpenClaw applies plugin lifecycle changes to a running local Gateway. Use
+`openclaw plugins reload evolveclaw` after editing source. A CLI inspection proves
+registration in that inspecting process; verify a real conversation and its
+sidecar effect to establish that the running Gateway loaded the change.
 
-**Option A — Install from registry (recommended):**
+## Install a built package
 
 ```bash
-# From npm
-openclaw plugins install evolveclaw
-
-# Or from ClawHub
-openclaw plugins install clawhub:evolveclaw
-
-openclaw gateway restart
+npm pack --pack-destination /tmp
+openclaw plugins install npm-pack:/tmp/evolveclaw-0.2.0.tgz --force --accept-capabilities
 ```
 
-**Option B — From local source (Linux / macOS / WSL2):**
+Then apply the same conversation/prompt grants and enablement above. The package
+contains compiled JavaScript, the manifest, Python sidecar, custom prompts,
+setup scripts, and documentation. Credentials, local virtual environments,
+and learned memory are excluded. `--force` acknowledges an arbitrary reviewed
+install source; it does not grant conversation access or privileged plugin trust.
+`--accept-capabilities` records consent for the reviewed plugin's declared runtime
+capabilities. Conversation and prompt grants remain explicit separate settings.
 
-```bash
-git clone https://github.com/JarvisPei/EvolveClaw.git
-cd EvolveClaw
-./scripts/install-plugin.sh
-openclaw gateway restart
-```
+## Upgrade an existing installation
 
-<details>
-<summary><b>Option B — From local source (Windows PowerShell)</b></summary>
+Back up the existing strategic memory and server `.env` before replacing an old
+install directory. Keep the existing `agentName` to retain its strategic namespace.
+If a package replacement changes the server directory, set `dataPath` to the
+existing absolute SCOPE data directory or move the backed-up data into stable
+OpenClaw state storage before starting the new sidecar.
 
-> OpenClaw itself requires WSL2 on Windows. If you're using WSL2, use the bash script above. The PowerShell method is provided for setups where OpenClaw runs natively.
+The repaired sidecar reports **version 0.4.0, protocol_version 2** at `/health`.
+The original detached server reports 0.3.0 without this protocol marker. Stop
+that old process with its existing process manager and start the updated server.
+The plugin identifies an incompatible server and logs a specific restart message;
+it does not terminate a server it did not start.
 
-```powershell
-git clone https://github.com/JarvisPei/EvolveClaw.git
-cd EvolveClaw
+Existing `server/.env` data-directory settings remain effective. Without an
+explicit data directory, an existing `server/scope_data` is reused; otherwise
+new memory goes under OpenClaw's stable service state directory. The strategic
+memory JSON format is unchanged. Tactical state is temporary and does not migrate.
 
-# Add plugin path to OpenClaw config
-$config = "$env:USERPROFILE\.openclaw\openclaw.json"
-$cfg = Get-Content $config | ConvertFrom-Json
-if (-not $cfg.plugins) { $cfg | Add-Member -NotePropertyName plugins -NotePropertyValue @{} }
-if (-not $cfg.plugins.load) { $cfg.plugins | Add-Member -NotePropertyName load -NotePropertyValue @{} }
-if (-not $cfg.plugins.load.paths) { $cfg.plugins.load | Add-Member -NotePropertyName paths -NotePropertyValue @() }
-$cfg.plugins.load.paths += (Resolve-Path .).Path
-if (-not $cfg.plugins.entries) { $cfg.plugins | Add-Member -NotePropertyName entries -NotePropertyValue @{} }
-$cfg.plugins.entries | Add-Member -NotePropertyName evolveclaw -NotePropertyValue @{enabled=$true} -Force
-$cfg | ConvertTo-Json -Depth 10 | Set-Content $config
+## Configuration
 
-openclaw gateway restart
-```
-
-</details>
-
-The plugin handles everything automatically on first gateway startup: it **auto-installs** Python dependencies (`scope-optimizer`, `fastapi`, etc.) if missing, then **auto-starts** the SCOPE server. No manual `pip install` or server launch needed.
-
-### 2. Verify It Works
-
-After restarting the gateway, check the logs for these lines:
-
-```
-[plugins] evolveclaw: activated (server=http://127.0.0.1:5757, agent=openclaw-agent, inject=append_system, maxGuidelines=30)
-[gateway] evolveclaw: installing Python dependencies...        # first launch only
-[gateway] evolveclaw: Python dependencies installed            # first launch only
-[gateway] evolveclaw: SCOPE server started successfully
-[gateway] evolveclaw: auto-configured SCOPE with OpenClaw's <your-model>
-[gateway] evolveclaw: loaded N strategic rule(s), guidelines.length: 1
-```
-
-If you see `activated` and `SCOPE server started successfully`, EvolveClaw is running. Start chatting — the agent will begin learning from your interactions after every few exchanges.
-
-> **Tip:** If you prefer to manage the server process yourself (e.g., for custom `.env` settings or running on a different host), start it manually before OpenClaw and set `"autoStartServer": false` in the plugin config. The plugin detects a running server via `/health` and skips spawning.
-
-<details>
-<summary><b>3. Configure (Optional)</b></summary>
-
-In `~/.openclaw/openclaw.json`:
-
-```json
+```json5
 {
-  "plugins": {
-    "entries": {
-      "evolveclaw": {
-        "enabled": true,
-        "config": {
-          "serverUrl": "http://127.0.0.1:5757",
-          "agentName": "openclaw-agent",
-          "injectMode": "append_system",
-          "maxGuidelines": 30,
-        }
-      }
-    }
-  }
+  plugins: {
+    allow: ["evolveclaw"], // Include your other existing allowed plugins too.
+    entries: {
+      evolveclaw: {
+        enabled: true,
+        hooks: { allowConversationAccess: true, allowPromptInjection: true },
+        config: {
+          serverUrl: "http://127.0.0.1:5757",
+          agentName: "openclaw-agent",
+          enabled: true,
+          injectMode: "append_system",
+          maxGuidelines: 30,
+          autoStartServer: true,
+        },
+      },
+    },
+  },
 }
 ```
 
-#### 🔧 Plugin Configuration
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `serverUrl` | `http://127.0.0.1:5757` | Sidecar endpoint; automatic process startup supports local HTTP URLs. |
+| `agentName` | `openclaw-agent` | Persistent namespace for the main OpenClaw agent. Other agent IDs receive distinct namespaces. |
+| `enabled` | `true` | Enable learning and injection within the installed plugin. |
+| `injectMode` | `append_system` | Append cacheable system context, or use `prepend_context` for per-turn user context. |
+| `maxGuidelines` | `30` | Limit injected individual guidelines, range 5–200; strategic guidance takes precedence, then the newest tactical advice. |
+| `scopeModel` | OpenClaw default | Optional synthesis-model override. |
+| `scopeProvider` | Detected | Optional `anthropic`, `openai`, or `litellm` adapter. |
+| `scopeApiKey` | Resolved by OpenClaw | Optional synthesis API key; marked sensitive in config UI. |
+| `scopeBaseUrl` | OpenClaw provider URL | Optional API endpoint override, including OpenAI-compatible endpoints. |
+| `autoStartServer` | `true` | Start a local sidecar as a plugin-owned service if none is running. |
+| `pythonPath` | Detected | Python executable/environment override. Dependencies are checked against pinned SCOPE 0.1.3. |
+| `dataPath` | Existing or stable state path | Optional absolute path to SCOPE data. |
 
-| Config | Default | Description |
-|--------|---------|-------------|
-| `serverUrl` | `http://127.0.0.1:5757` | SCOPE sidecar URL |
-| `agentName` | `openclaw-agent` | Agent identifier in SCOPE memory |
-| `enabled` | `true` | Toggle on/off without uninstalling |
-| `injectMode` | `append_system` | `append_system` (cacheable) or `prepend_context` (per-turn) |
-| `maxGuidelines` | `30` | Max guidelines in memory; oldest tactical evicted first when cap is reached |
-| `scopeModel` | *(auto from OpenClaw)* | Override the model SCOPE uses for guideline synthesis (e.g., `gpt-4o-mini` for cheaper synthesis) |
-| `scopeProvider` | *(auto from OpenClaw)* | Override the SCOPE provider: `anthropic`, `openai`, or `litellm` |
-| `scopeApiKey` | *(auto from OpenClaw)* | Override the API key SCOPE uses |
-| `scopeBaseUrl` | *(auto from OpenClaw)* | Override the base URL for SCOPE's LLM API |
-| `autoStartServer` | `true` | Auto-start the SCOPE server if not already running. Set to `false` if you manage the server yourself |
-| `pythonPath` | *(auto-detect)* | Full path to the Python binary (e.g., `/path/to/miniconda3/bin/python3`). Tries `server/venv/bin/python3`, `python3`, `python` by default |
+Server `.env` credentials take precedence over forwarded configuration, as before.
+The plugin supports both object and string OpenClaw default-model settings,
+uses the host's model/auth helpers, and retries configuration after an outage or
+sidecar restart. Existing configured sidecars receive updated overrides when the
+plugin service starts. OAuth and ambient AWS auth need separate compatible SCOPE
+credentials; they are not forwarded as ordinary API keys.
 
-> **LLM auto-detection:** By default, EvolveClaw reads OpenClaw's primary model configuration (`api.config.models.providers` + `api.config.agents.defaults.model.primary`) and forwards it to the SCOPE server at startup. No duplicate API key configuration needed. Set the `scope*` fields above only if you want SCOPE to use a different (e.g., cheaper) model than OpenClaw.
+See [server/.env.template](server/.env.template) for synthesis frequency,
+confidence thresholds, memory limits, and provider environment settings. The
+defaults remain efficiency mode, quality analysis every third successful step,
+medium acceptance, 0.85 strategic promotion, twenty guidelines per task, and ten
+strategic rules per domain. The SCOPE dependency is pinned to 0.1.3 because the
+task-lifecycle adapter deliberately contains that version's private-counter defect.
 
-#### ⚡ Server Configuration (Environment Variables)
+## Operation
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `EVOLVECLAW_HOST` | `127.0.0.1` | Server bind address |
-| `EVOLVECLAW_PORT` | `5757` | Server port |
-| `EVOLVECLAW_SCOPE_MODEL` | *(auto from plugin)* | LLM for guideline synthesis; set only to override auto-detection |
-| `EVOLVECLAW_SCOPE_PROVIDER` | *(auto from plugin)* | `anthropic`, `openai`, or `litellm`; set only to override auto-detection |
-| `EVOLVECLAW_SCOPE_DATA` | `./scope_data` | Directory for persistent strategic rules |
-| `EVOLVECLAW_SYNTHESIS_MODE` | `efficiency` | `efficiency` (fast) or `thoroughness` (comprehensive) |
-| `EVOLVECLAW_QUALITY_ANALYSIS` | `true` | Analyze successful steps too |
-| `EVOLVECLAW_QUALITY_FREQUENCY` | `3` | Analyze quality every N successful steps (recent conversation history is included for context) |
-| `EVOLVECLAW_ACCEPT_THRESHOLD` | `medium` | `all`, `low`, `medium`, `high` |
-| `EVOLVECLAW_STRATEGIC_THRESHOLD` | `0.85` | Min confidence for strategic promotion |
-| `EVOLVECLAW_MAX_RULES_PER_TASK` | `20` | Max rules SCOPE keeps per task |
-| `EVOLVECLAW_MAX_STRATEGIC_PER_DOMAIN` | `10` | Max strategic rules per domain |
+1. `before_prompt_build` injects cached strategic and session-local tactical
+   guidance immediately, and refreshes memory in the background.
+2. `llm_input` captures the actual assembled system prompt. `llm_output` captures
+   `assistantTexts`; tool hooks capture `toolName`, `params`, structured results,
+   and errors using current OpenClaw payloads.
+3. `agent_end` sends a bounded trace and recent conversation history to SCOPE.
+   Errors and successful runs retain the existing reflection/quality paths.
+4. Accepted temporary advice is retained in its originating session. Successful
+   strategic promotion reloads authoritative persisted memory after any merging
+   or pruning. Older HTTP responses cannot replace a newer memory snapshot.
+5. `session_end` clears that session's tactical state and resets the corresponding
+   SDK counters. Strategic memory remains available across sessions and restarts.
 
-</details>
+Heartbeats, memory/cron triggers, and subagent sessions remain excluded. Sessions
+and runs have separate state, so simultaneous conversations cannot mix traces or
+clear each other's buffers. A new session begins without another session's tactical
+guidance. Remote outages fail open; prompt building does not await remote requests.
+Learned advice remains subordinate to current system and user instructions.
 
-## 🧬 What Makes It Self-Evolving
+The plugin claims neither the memory slot nor the context-engine slot and can
+coexist with other prompt/memory plugins. The service stops only its own Python
+child on shutdown/reload. External servers remain externally managed.
 
-Unlike static prompt engineering or manual rule files, EvolveClaw implements a **self-improvement loop** with the following components:
+## Run a separate sidecar
 
-<details>
-<summary><b>🎯 Personalized Learning Signal</b></summary>
-
-- **Rich execution traces**: Captures model output, tool calls (`before_tool_call`), tool results (`after_tool_call`), and errors — learning from the full behavioral footprint, not just text
-- **Task description**: The user's last message is extracted and passed to SCOPE for per-task guideline management
-
-</details>
-
-<details>
-<summary><b>🧠 Adaptive Memory</b></summary>
-
-- **Strategic memory** — Cross-task guidelines that persist to disk. Loaded on startup
-- **Tactical memory** — Task-specific guidelines that live in-memory and auto-clear on session switch
-- **Automatic memory optimization** — When strategic rules accumulate past the domain limit, SCOPE's `MemoryOptimizer` automatically consolidates similar rules, prunes rules subsumed by more general ones, and resolves conflicts — all via LLM-driven analysis, not simple truncation
-- **Plugin-side guideline cap** — The plugin enforces a maximum guideline count in memory; oldest tactical guidelines are evicted first when the cap is reached
-
-</details>
-
-<details>
-<summary><b>🎨 Custom SCOPE Prompts & Domains</b></summary>
-
-SCOPE's built-in prompts are designed for task-specific benchmarks. EvolveClaw overrides them via SCOPE's `custom_prompts` and `custom_domains` API (`server/prompts.py`) to focus on personal assistant concerns:
-
-| Domain | What It Captures |
-|--------|-----------------|
-| `tool_usage` | IDE/shell tool patterns — file ops, search, terminal commands |
-| `code_quality` | Task execution patterns, code style, correctness, output quality |
-| `error_handling` | Safe operations, rollback strategies, error recovery |
-| `communication` | Response style, conciseness, explanation depth |
-| `user_preferences` | Learned user habits — coding style, frameworks, conventions |
-| `context_awareness` | Project structure knowledge, conversation history |
-| `workflow` | Multi-step task planning, edit-test cycles |
-| `general` | Catch-all for uncategorized rules |
-
-The `user_preferences` domain is particularly important: when the analyzer detects consistent user habits (e.g., "always uses TypeScript", "prefers concise responses"), these are classified as **strategic** and persist across sessions — so the assistant remembers your preferences permanently.
-
-</details>
-
-<details>
-<summary><b>🔇 Sub-Agent Filtering</b></summary>
-
-OpenClaw internally spawns sub-agents (file search, code lookup, etc.) that use minimal system prompts. EvolveClaw filters these out — only the main user-facing session generates guidelines. Sub-agent sessions are detected by the `"subagent:"` prefix in the session key and silently skipped across all hooks.
-
-</details>
-
-<details>
-<summary><b>💉 Injection Modes</b></summary>
-
-- **`append_system`** (default) — Guidelines are appended to the system prompt, which LLM providers typically cache for token efficiency
-- **`prepend_context`** — Guidelines are prepended to the per-turn context, sent fresh each turn
-
-</details>
-
-<details>
-<summary><b>📊 Observability</b></summary>
-
-- **Periodic logging** — The plugin logs guideline distribution by type every 5 steps
-- **Stats endpoint** — `GET /stats/{agent_name}` returns strategic count, total steps, synthesis rate, and uptime
-
-</details>
-
-<details>
-<summary><b>🏗️ Architecture</b></summary>
-
-```
-evolveclaw/
-├── package.json               # npm/ClawHub package manifest
-├── openclaw.plugin.json       # Plugin manifest with config schema
-├── plugin/                    # OpenClaw TypeScript plugin
-│   └── src/
-│       ├── index.ts           # Plugin entry: lifecycle hooks, guideline management
-│       ├── scope-client.ts    # HTTP client for SCOPE sidecar
-│       └── types.ts           # Shared type definitions (config, API, guideline metadata)
-├── server/                    # SCOPE sidecar HTTP server (Python)
-│   ├── server.py              # FastAPI server: step analysis, tactical reset, stats
-│   ├── config.py              # Server configuration (env vars)
-│   ├── prompts.py             # Custom SCOPE prompts & domains for personal assistant use
-│   ├── requirements.txt
-│   └── .env.template          # Environment variable template
-└── scripts/
-    ├── start-server.sh        # Start the SCOPE sidecar
-    └── install-plugin.sh      # Auto-configure OpenClaw to load the plugin
+```bash
+./scripts/start-server.sh
 ```
 
-</details>
+This creates a local Python environment, installs the pinned dependency, and starts
+the same HTTP API. A `.env` is optional: the server can wait for model configuration
+from OpenClaw. Set `autoStartServer: false` when a process manager owns the server.
 
-## 📋 TODOs and Known Limitations
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Availability, configuration status, server/protocol version. |
+| `POST /configure` | Synthesis provider/model/key/URL; explicit server credentials retain priority. |
+| `POST /step` | Completed-run analysis; accepted guideline and memory type. |
+| `GET /rules/{agent_name}` | Formatted strategic memory, individual guidelines, and actual rule count. |
+| `POST /reset` | Reset one task's tactical counters/history, or all tactical tasks for an agent. |
+| `GET /stats/{agent_name}` | Step/guideline counts, strategic count, synthesis rate, uptime. |
 
-- [ ] **Feedback loop** — No auto-feedback from the plugin (OpenClaw has no `user_feedback` hook). Could be added once SCOPE supports guideline removal or OpenClaw adds a feedback hook.
-- [ ] **Migrate to focused SDK subpaths** — OpenClaw v2026.3.22 introduced `openclaw/plugin-sdk/*` subpaths (e.g., `openclaw/plugin-sdk/plugin-entry`) as the recommended import surface. Our plugin uses the monolithic `openclaw/plugin-sdk` which is still fully supported. Once installed via ClawHub, the focused subpaths can be adopted.
+## Development and verification
 
-<details>
-<summary><b>🎯 Design Decisions</b></summary>
-
-### Why self-evolving prompts (not fine-tuning)?
-
-- **Zero training cost**: No GPU, no dataset curation — guidelines are synthesized in-context by the same LLM
-- **Interpretable**: Every guideline is a human-readable sentence you can inspect, edit, or delete
-- **Reversible**: Guidelines are human-readable and can be inspected or deleted; fine-tuning is a one-way door
-- **Personalized at the prompt level**: Works with any base model — swap `gpt-4o` for `claude` and your guidelines carry over
-
-### Why a sidecar server (not embedded)?
-
-- **Language bridge**: SCOPE is Python; OpenClaw plugins are TypeScript. A sidecar avoids complex Node↔Python IPC
-- **Decoupled lifecycle**: The SCOPE server can be restarted, upgraded, or swapped independently of OpenClaw
-- **Graceful degradation**: If the SCOPE server is down, the plugin silently no-ops — OpenClaw keeps working normally
-
-### Why plugin hooks (not bootstrap files)?
-
-- **Dynamic**: `before_prompt_build` injects guidelines per-turn, not just at session start
-- **System prompt space**: `appendSystemContext` places guidelines in cacheable system prompt space, reducing per-turn token cost
-- **Clean lifecycle**: `llm_output` + `before_tool_call` + `after_tool_call` + `agent_end` capture the full step context for SCOPE analysis
-- **Bootstrap files still work**: Strategic rules *could* additionally be written to `AGENTS.md` for persistence across restarts
-
-### Zero-latency design
-
-EvolveClaw adds **zero user-perceived latency** to OpenClaw. The only potentially slow operation (LLM-based guideline synthesis) happens asynchronously after the agent has already responded:
-
-| Hook | Blocking? | What it does |
-|------|-----------|-------------|
-| `before_prompt_build` | Sync, ~0ms | Reads from in-memory guideline array — no HTTP, no I/O |
-| `llm_output` | Sync, ~0ms | Stores a string in a variable |
-| `before_tool_call` | Sync, ~0ms | Pushes tool name to an array |
-| `after_tool_call` | Sync, ~0ms | Pushes result to an array |
-| `agent_end` | **Async, fire-and-forget** | HTTP call to SCOPE server → LLM synthesis. OpenClaw does **not** await this — confirmed in source: *"fire-and-forget, so we don't await"* |
-
-New guidelines only appear on the **next** turn, after the background synthesis completes.
-
-### Guideline types
-
-| Type | Scope | Persistence | Injection | Priority |
-|------|-------|-------------|-----------|----------|
-| **Strategic** | Cross-task | Saved to disk — your agent's evolved personality | Loaded on startup + periodic refresh | Highest |
-| **Tactical** | Current task | In-memory only — ephemeral working memory | Cleared on session switch | Lowest (most recent wins) |
-
-</details>
-
-<details>
-<summary><b>🔌 API Endpoints</b></summary>
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Health check (includes `configured` flag) |
-| `GET` | `/rules/{agent_name}` | Get strategic rules for an agent |
-| `GET` | `/stats/{agent_name}` | Get observability metrics for self-improvement tracking |
-| `POST` | `/step` | Report a completed step for SCOPE analysis |
-| `POST` | `/reset` | Reset tactical state on session/task switch |
-| `POST` | `/configure` | Forward LLM config from plugin (auto-called at startup) |
-
-</details>
-
-## 🔧 Compatibility
-
-| Component | Tested Version | Notes |
-|-----------|---------------|-------|
-| OpenClaw | v2026.3.22+ | Uses `openclaw/plugin-sdk` (monolithic, still supported) |
-| Python | 3.10+ | For the SCOPE sidecar server |
-| Node.js | 22+ | Required by OpenClaw |
-| SCOPE | 0.1.3+ | `custom_prompts` and `custom_domains` API required |
-
-## 🔗 Related Projects
-
-- [SCOPE](https://github.com/JarvisPei/SCOPE) — The prompt evolution framework powering EvolveClaw
-- [OpenClaw](https://github.com/openclaw/openclaw) — The AI agent platform
-
-## 📖 Citation
-
-```bibtex
-@software{pei2026evolveclaw,
-  title={EvolveClaw: Evolving OpenClaw's System Prompt via Self-Improving Guidelines},
-  author={Pei, Zehua and Zhen, Hui-Ling},
-  url={https://github.com/JarvisPei/EvolveClaw},
-  year={2026}
-}
-
-@article{pei2025scope,
-  title={SCOPE: Prompt Evolution for Enhancing Agent Effectiveness},
-  author={Pei, Zehua and Zhen, Hui-Ling and Kai, Shixiong and Pan, Sinno Jialin and Wang, Yunhe and Yuan, Mingxuan and Yu, Bei},
-  journal={arXiv preprint arXiv:2512.15374},
-  year={2025}
-}
+```bash
+npm ci --ignore-scripts
+npm run typecheck
+npm test
+python3 -m venv server/venv
+server/venv/bin/python -m pip install -r server/requirements-dev.txt
+server/venv/bin/python -m pytest -q
+EVOLVECLAW_TEST_PYTHON="$PWD/server/venv/bin/python" npm test
+npm run verify:package
 ```
 
-## ⚖️ License
+The Python tests use the real pinned SCOPE library with mocked synthesis, not paid
+provider calls. The subprocess test starts/stops the actual sidecar on a temporary
+port. Package verification installs the tarball into isolated OpenClaw state,
+inspects seven hooks plus the service, and checks denied conversation access.
+It neither edits the normal OpenClaw configuration nor contacts its Gateway.
+GitHub Actions runs the same compatibility checks.
 
-MIT
+`openclaw plugins validate` currently validates tool/feature authoring metadata;
+it does not validate this hook/service plugin. Runtime inspection and the managed
+package test are the applicable host proofs. See [OpenClaw authoring docs](https://docs.openclaw.ai/cli/plugins/authoring).
+
+Mechanical verification is not a measurement of improved answer quality. The
+[research assessment](docs/research-assessment.md) explains the paper's Pass@2
+results, missing research mechanisms, cost overhead, reproducibility limitations,
+and a proposed future evaluation on representative OpenClaw tasks.
+
+## Citation and license
+
+SCOPE: Prompt Evolution for Enhancing Agent Effectiveness, Zehua Pei et al.
+[arXiv:2512.15374v2](https://arxiv.org/abs/2512.15374v2), revised 28 May 2026.
+EvolveClaw and SCOPE are MIT-licensed; see [LICENSE](LICENSE) and the upstream
+[SCOPE repository](https://github.com/JarvisPei/SCOPE).

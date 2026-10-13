@@ -14,6 +14,7 @@ export type EvolveClawConfig = {
   scopeBaseUrl?: string;
   autoStartServer: boolean;
   pythonPath?: string;
+  dataPath?: string;
 };
 
 // ── Guideline with metadata ──
@@ -50,12 +51,15 @@ export type StepCompleteResponse = {
 export type RulesResponse = {
   rules: string;
   rule_count: number;
+  guidelines?: string[];
+  configured?: boolean;
 };
 
 export type HealthResponse = {
   status: "ok" | "error";
   version: string;
   configured?: boolean;
+  protocol_version?: number;
 };
 
 export type StatsResponse = {
@@ -76,6 +80,6 @@ export type ConfigureRequest = {
 };
 
 export type ConfigureResponse = {
-  status: "ok" | "skipped";
+  status: "ok" | "skipped" | "error";
   reason?: string;
 };

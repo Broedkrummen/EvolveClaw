@@ -1,8 +1,9 @@
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 
 
 class ServerConfig:
@@ -10,7 +11,7 @@ class ServerConfig:
     PORT: int = int(os.getenv("EVOLVECLAW_PORT", "5757"))
 
     # LLM for SCOPE guideline synthesis (optional — auto-detected from OpenClaw)
-    SCOPE_DATA_PATH: str = os.getenv("EVOLVECLAW_SCOPE_DATA", "./scope_data")
+    SCOPE_DATA_PATH: str = os.getenv("EVOLVECLAW_SCOPE_DATA") or os.getenv("EVOLVECLAW_SCOPE_DATA_DEFAULT", "./scope_data")
     SCOPE_MODEL: str = os.getenv("EVOLVECLAW_SCOPE_MODEL", "")
     SCOPE_PROVIDER: str = os.getenv("EVOLVECLAW_SCOPE_PROVIDER", "")
     SCOPE_API_KEY: str | None = os.getenv("EVOLVECLAW_SCOPE_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")

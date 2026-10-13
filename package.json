@@ -1,12 +1,12 @@
 {
   "name": "evolveclaw",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenClaw plugin that evolves the agent's system prompt using SCOPE (Self-evolving Context Optimization via Prompt Evolution)",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/JarvisPei/EvolveClaw.git"
+    "url": "https://github.com/Broedkrummen/EvolveClaw.git"
   },
   "keywords": [
     "openclaw",
@@ -18,24 +18,53 @@
   ],
   "openclaw": {
     "extensions": [
-      "./plugin/src/index.ts"
-    ]
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.10.2",
+      "minGatewayVersion": "2026.10.2"
+    },
+    "build": {
+      "openclawVersion": "2026.10.2",
+      "pluginSdkVersion": "2026.10.2"
+    }
   },
   "files": [
-    "plugin/",
+    "dist/",
     "server/",
     "!server/.env",
     "!server/.env.local",
     "!server/.env.bak",
+    "!server/venv/",
+    "!server/.venv/",
+    "!server/__pycache__/",
+    "!server/scope_data/",
     "scripts/",
+    "docs/",
     "openclaw.plugin.json"
   ],
   "peerDependencies": {
-    "openclaw": ">=2026.3.0"
+    "openclaw": ">=2026.10.2"
   },
   "peerDependenciesMeta": {
     "openclaw": {
       "optional": true
     }
+  },
+  "engines": {
+    "node": "^24.16.0 || >=26.1.0"
+  },
+  "scripts": {
+    "build": "esbuild plugin/src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "prepack": "npm run build",
+    "verify:package": "npm run build && node scripts/verify-package.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "esbuild": "^0.28.0",
+    "openclaw": "2026.10.2",
+    "typescript": "^6.0.0"
   }
 }
