@@ -78,6 +78,21 @@ worlds and paper perspective state remain independent. The CLI awaits worker
 cleanup after both successful and aborted evaluations. Native scheduling and host
 system instructions are recorded differences from the original paper harness.
 
+`--openclaw-node` is an alias for the explicit Node path. Up to four independent
+warm hosts can be selected with `--openclaw-workers`; each worker executes requests
+sequentially. `--max-concurrent-sequences` independently bounds whole sequence
+jobs to 1–4, defaulting to one. Each job keeps its own memory and original event
+order, while every job and paper perspective shares the same atomic ledger.
+Completed rows are saved in canonical condition/sequence order. On failure the
+ledger blocks new reservations, all remaining jobs are cancelled and joined, and
+only then is the final incomplete usage snapshot written.
+
+`native_execution.json` records allowlisted native identity, normalized usage,
+configuration hash, worker version/source hash, and scheduling/budget metadata
+after completed sequences and on abort. Model text, provider headers, and raw
+diagnostic output are excluded. Full scored fixture traces remain separate
+evaluator-only artifacts.
+
 ## Verification and remaining evidence
 
 Implemented offline checks in `tests/test_model_integration.py` exercise all five actual learning algorithms with injected provider responses; exact historical source provenance; default no-spend planning; no scorer inputs; independent paper callbacks and constant experiment namespaces across user/project scope changes; scoped retrieval and history undo preserving an unrelated rule; unavailable-baseline rejection; and shared-budget failure, including upstream-swallowed model exceptions. Separate model/controller tests cover provider accounting and step-level dual-stream behavior.

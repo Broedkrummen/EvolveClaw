@@ -27,6 +27,27 @@ for (const method of ["log", "error", "warn", "info", "debug"]) console[method] 
 
 let agentExecCommand;
 let metadata;
+let requestIndex = 0;
+const resourceTypes = new Set(["Timeout", "Immediate", "FSReqCallback", "FileHandle",
+  "PipeWrap", "TCPSocketWrap", "TCPServerWrap", "TTYWrap", "SignalWrap",
+  "ProcessWrap", "MessagePort", "UDPWrap", "ConnectWrap", "WriteWrap"]);
+function telemetry() {
+  const memory = process.memoryUsage();
+  const usage = process.resourceUsage();
+  const active = {};
+  for (const value of process.getActiveResourcesInfo()) {
+    const kind = resourceTypes.has(value) ? value : "other";
+    active[kind] = (active[kind] ?? 0) + 1;
+  }
+  return { pid: process.pid, parent_pid: process.ppid, request_index: requestIndex,
+    rss_bytes: memory.rss, rss_high_water_bytes: usage.maxRSS * 1024,
+    heap_total_bytes: memory.heapTotal, heap_used_bytes: memory.heapUsed,
+    external_bytes: memory.external, array_buffers_bytes: memory.arrayBuffers,
+    user_cpu_us: usage.userCPUTime, system_cpu_us: usage.systemCPUTime,
+    voluntary_context_switches: usage.voluntaryContextSwitches,
+    involuntary_context_switches: usage.involuntaryContextSwitches,
+    active_resource_counts: active };
+}
 try {
   const cli = await realpath(process.argv[2]);
   const installation = path.dirname(cli);
@@ -39,7 +60,7 @@ try {
   if (typeof agentExecCommand !== "function") throw new Error("entry");
   metadata = { openclaw_version: VERSION, entry_file: ENTRY, entry_source_sha256: digest,
     internal_entry: true, persistent_worker: true, model_requests_serialized: true };
-  emit({ ready: true, metadata });
+  emit({ ready: true, metadata, telemetry: telemetry() });
 } catch {
   emit({ ready: false, error_kind: "native-worker-version-or-source-admission" });
   process.exit(1);
@@ -51,6 +72,10 @@ async function execute(request) {
   if (request.op !== "execute" || typeof request.prompt !== "string" || !request.prompt.trim()
       || typeof request.configPath !== "string" || typeof request.cwd !== "string"
       || typeof request.modelRef !== "string" || !Number.isSafeInteger(request.timeout) || request.timeout < 1) throw new Error("request");
+  requestIndex += 1;
+  // Emit before entering native code: abrupt process death still leaves safe
+  // counters for the in-flight request. Never emit prompt/config/auth data.
+  emit({ id: request.id, event: "request-started", telemetry: telemetry() });
   let captured;
   const runtime = {
     log: () => {}, error: () => {}, writeStdout: () => {},
@@ -69,12 +94,12 @@ async function execute(request) {
   if (!envelope.ok) {
     // Drop error strings/payloads entirely; the Python adapter preserves known
     // usage without exposing the native diagnostics or retrying this request.
-    return { id: request.id, exitCode: result?.exitCode ?? 1, metadata,
+    return { id: request.id, exitCode: result?.exitCode ?? 1, metadata, telemetry: telemetry(),
       envelope: { ok: false, status: envelope.status === "timeout" ? "timeout" : "error",
         final: "", usage: envelope.usage, provider: envelope.provider, model: envelope.model,
         assistantTurns: envelope.assistantTurns, toolSummary: envelope.toolSummary } };
   }
-  return { id: request.id, exitCode: result?.exitCode ?? 0, metadata,
+  return { id: request.id, exitCode: result?.exitCode ?? 0, metadata, telemetry: telemetry(),
     envelope: Object.fromEntries(["ok", "status", "final", "usage", "provider", "model",
       "assistantTurns", "toolSummary"].filter((key) => envelope[key] !== undefined).map((key) => [key, envelope[key]])) };
 }
@@ -95,7 +120,7 @@ for await (const chunk of process.stdin) {
       if (result.closed) process.exit(0);
     } catch {
       emit({ id: Number.isSafeInteger(request?.id) ? request.id : null,
-        error_kind: "native-worker-request-failed" });
+        error_kind: "native-worker-request-failed", telemetry: telemetry() });
     }
   }
 }

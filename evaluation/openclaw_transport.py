@@ -18,6 +18,50 @@ from time import perf_counter
 
 NATIVE_OPENCLAW_VERSION = "2026.10.2"
 NATIVE_ENTRY_SHA256 = "a638bf91efbd775ab4b2d66fd0d6e124074b6edcbad8f85a487e07dab25b8504"
+_RESOURCE_TYPES = frozenset(("Timeout", "Immediate", "FSReqCallback", "FileHandle",
+    "PipeWrap", "TCPSocketWrap", "TCPServerWrap", "TTYWrap", "SignalWrap",
+    "ProcessWrap", "MessagePort", "UDPWrap", "ConnectWrap", "WriteWrap", "other"))
+_STDERR_MARKERS = {
+    "sqlite-wal-sidecar-identity-mismatch": b"sqlite_wal_sidecar_identity_mismatch",
+    "sqlite-wal-sidecar-fatal": b"SQLite WAL sidecar identity mismatch; terminating without SQLite cleanup",
+    "node-heap-allocation-failure": b"Allocation failed - JavaScript heap out of memory",
+    "node-heap-limit-failure": b"Reached heap limit",
+}
+
+
+def _safe_worker_telemetry(value):
+    """Copy only numeric runtime counters; never runtime diagnostic strings."""
+    if not isinstance(value, dict):
+        return {}
+    fields = ("pid", "parent_pid", "request_index", "rss_bytes", "rss_high_water_bytes",
+              "heap_total_bytes", "heap_used_bytes", "external_bytes", "array_buffers_bytes",
+              "user_cpu_us", "system_cpu_us", "voluntary_context_switches", "involuntary_context_switches")
+    result = {key: value[key] for key in fields if _integer(value.get(key))}
+    counts = value.get("active_resource_counts")
+    if isinstance(counts, dict):
+        result["active_resource_counts"] = {key: count for key, count in counts.items()
+            if key in _RESOURCE_TYPES and _integer(count)}
+    return result
+
+
+def _process_snapshot(process):
+    """Read counters only; no command lines, paths, descriptors or environment."""
+    if process is None:
+        return {}
+    result = {"pid": process.pid, "process_returncode": process.returncode}
+    if isinstance(process.returncode, int) and process.returncode < 0:
+        result["process_exit_signal_number"] = -process.returncode
+    try:
+        fields = {"VmRSS": "rss_bytes", "VmHWM": "rss_high_water_bytes", "Threads": "thread_count"}
+        for line in Path(f"/proc/{process.pid}/status").read_text().splitlines():
+            name, _, rest = line.partition(":")
+            if name in fields:
+                count = int(rest.split()[0])
+                result[fields[name]] = count * 1024 if name != "Threads" else count
+        result["file_descriptor_count"] = len(list(Path(f"/proc/{process.pid}/fd").iterdir()))
+    except (OSError, ValueError, IndexError):
+        pass
+    return result
 
 class NativeOpenClawError(RuntimeError):
     """Sanitized native failure, with optional independently safe usage data."""
@@ -209,18 +253,68 @@ class NativeOpenClawTransport:
         self._worker, self._worker_metadata = None, None
         self._worker_lock = asyncio.Lock()
         self._request_id, self._closed = 0, False
+        self._worker_generation = 0
+        self._stderr_task = None
+        self._stderr_bytes = 0
+        self._stderr_digest = sha256()
+        self._stderr_categories = set()
+        self._last_worker_telemetry = {}
+        self._bridge_sha256 = sha256(self.worker_path.read_bytes()).hexdigest() if warm_worker else None
+
+    async def _collect_worker_stderr(self, stream):
+        # Drain continuously so native fs.writeSync(2) cannot deadlock the host.
+        # Retain a bounded matching window and fingerprint, never raw bytes.
+        tail = b""
+        while chunk := await stream.read(4096):
+            self._stderr_bytes += len(chunk)
+            self._stderr_digest.update(chunk)
+            window = tail + chunk
+            for category, marker in _STDERR_MARKERS.items():
+                if marker in window:
+                    self._stderr_categories.add(category)
+            tail = window[-256:]
+
+    def _worker_evidence(self, phase):
+        return {"phase": phase, "worker_generation": self._worker_generation,
+                "request_index": self._request_id,
+                "bridge_source_sha256": self._bridge_sha256,
+                "entry_source_sha256": NATIVE_ENTRY_SHA256,
+                "process": _process_snapshot(self._worker),
+                "last_worker_telemetry": deepcopy(self._last_worker_telemetry),
+                "stderr_bytes": self._stderr_bytes,
+                "stderr_sha256": self._stderr_digest.hexdigest(),
+                "stderr_categories": sorted(self._stderr_categories),
+                "stderr_retained_bytes": 0}
 
     async def _stop_worker(self):
         process, self._worker = self._worker, None
         if process is None:
-            return
+            return {}
+        cleanup = {"process_returncode_before_cleanup": process.returncode,
+                   "signal_sent": None}
         if process.returncode is None:
-            process.terminate()
+            try:
+                process.terminate()
+                cleanup["signal_sent"] = "SIGTERM"
+            except ProcessLookupError:
+                pass
             try:
                 await asyncio.wait_for(process.wait(), 5)
             except asyncio.TimeoutError:
-                process.kill()
+                try:
+                    process.kill()
+                    cleanup["signal_sent"] = "SIGKILL"
+                except ProcessLookupError:
+                    pass
                 await process.wait()
+        if self._stderr_task is not None:
+            try:
+                await asyncio.wait_for(self._stderr_task, 2)
+            except (asyncio.TimeoutError, OSError):
+                pass
+            self._stderr_task = None
+        cleanup["process_returncode_after_cleanup"] = process.returncode
+        return cleanup
 
     async def close(self):
         async with self._worker_lock:
@@ -245,18 +339,28 @@ class NativeOpenClawTransport:
         async with self._worker_lock:
             if self._closed:
                 raise NativeOpenClawError("native-worker-closed")
+            phase = "worker-start"
+            started_telemetry = {}
             try:
                 if self._worker is None:
+                    if sha256(self.worker_path.read_bytes()).hexdigest() != self._bridge_sha256:
+                        raise NativeOpenClawError("native-worker-source-changed")
                     self._worker = await asyncio.create_subprocess_exec(str(self.node_path), str(self.worker_path), str(self.cli_path),
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.DEVNULL, cwd=self.workspace_path, limit=4_000_001)
+                        stderr=asyncio.subprocess.PIPE, cwd=self.workspace_path, limit=4_000_001)
+                    self._worker_generation += 1
+                    self._stderr_task = asyncio.create_task(self._collect_worker_stderr(self._worker.stderr))
+                    phase = "worker-admission"
                     ready_line = await asyncio.wait_for(self._worker.stdout.readline(), 120)
+                    if not ready_line:
+                        raise NativeOpenClawError("native-worker-protocol-eof")
                     ready = json.loads(ready_line)
                     if ready.get("ready") is not True or not isinstance(ready.get("metadata"), dict):
                         raise NativeOpenClawError("native-worker-admission")
                     self._worker_metadata = ready["metadata"]
                     if self._worker_metadata.get("openclaw_version") != NATIVE_OPENCLAW_VERSION or self._worker_metadata.get("entry_source_sha256") != NATIVE_ENTRY_SHA256:
                         raise NativeOpenClawError("native-worker-version-or-source-admission")
+                    self._last_worker_telemetry = _safe_worker_telemetry(ready.get("telemetry"))
                 self._request_id += 1
                 request = {"id": self._request_id, "op": "execute", "prompt": stdin.decode("utf-8"),
                            "configPath": str(self.config_path), "cwd": str(self.workspace_path),
@@ -264,21 +368,65 @@ class NativeOpenClawTransport:
                 encoded = (json.dumps(request, ensure_ascii=False, allow_nan=False) + "\n").encode()
                 if len(encoded) > 4_000_000:
                     raise ValueError("Native worker request exceeds the supported size")
+                phase = "request-write"
                 self._worker.stdin.write(encoded)
                 await self._worker.stdin.drain()
+                phase = "reply-read"
                 reply_line = await asyncio.wait_for(self._worker.stdout.readline(), timeout + 30)
+                if not reply_line:
+                    raise NativeOpenClawError("native-worker-protocol-eof")
+                phase = "reply-json"
                 reply = json.loads(reply_line)
+                if isinstance(reply, dict) and reply.get("event") == "request-started" and reply.get("id") == self._request_id:
+                    started_telemetry = _safe_worker_telemetry(reply.get("telemetry"))
+                    self._last_worker_telemetry = started_telemetry
+                    phase = "reply-read"
+                    reply_line = await asyncio.wait_for(self._worker.stdout.readline(), timeout + 30)
+                    if not reply_line:
+                        raise NativeOpenClawError("native-worker-protocol-eof")
+                    phase = "reply-json"
+                    reply = json.loads(reply_line)
+                phase = "reply-schema"
+                if not isinstance(reply, dict):
+                    raise NativeOpenClawError("native-worker-protocol")
+                self._last_worker_telemetry = _safe_worker_telemetry(reply.get("telemetry")) or self._last_worker_telemetry
                 if reply.get("id") != self._request_id or "error_kind" in reply or not isinstance(reply.get("envelope"), dict):
                     raise NativeOpenClawError("native-worker-protocol")
-                return json.dumps(reply["envelope"]).encode(), b"", reply.get("exitCode", 1), deepcopy(self._worker_metadata)
+                evidence = self._worker_evidence("completed")
+                evidence["request_started_telemetry"] = started_telemetry
+                return json.dumps(reply["envelope"]).encode(), b"", reply.get("exitCode", 1), deepcopy(self._worker_metadata), evidence
             except asyncio.CancelledError:
-                await self._stop_worker()
+                evidence = self._worker_evidence(phase)
+                evidence["cleanup"] = await self._stop_worker()
+                evidence.update({"stderr_bytes": self._stderr_bytes, "stderr_sha256": self._stderr_digest.hexdigest(),
+                                 "stderr_categories": sorted(self._stderr_categories)})
+                self.events.append({"status": "cancelled", "native_evidence": evidence})
                 self._closed = True
                 raise
-            except Exception:
-                await self._stop_worker()
+            except Exception as exc:
+                # EOF can precede asyncio's child-status callback. Briefly join
+                # before cleanup, preserving an actual signal rather than the
+                # SIGTERM subsequently sent by this adapter.
+                if self._worker is not None and isinstance(exc, NativeOpenClawError) and exc.kind == "native-worker-protocol-eof":
+                    try:
+                        await asyncio.wait_for(self._worker.wait(), .25)
+                    except asyncio.TimeoutError:
+                        pass
+                kind = exc.kind if isinstance(exc, NativeOpenClawError) else (
+                    "native-worker-timeout" if isinstance(exc, asyncio.TimeoutError) else
+                    "native-worker-invalid-json" if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)) else
+                    "native-worker-broken-pipe" if isinstance(exc, (BrokenPipeError, ConnectionError)) else
+                    "native-worker-failure")
+                evidence = self._worker_evidence(phase)
+                evidence["request_started_telemetry"] = started_telemetry
+                evidence["cleanup"] = await self._stop_worker()
+                evidence.update({"stderr_bytes": self._stderr_bytes, "stderr_sha256": self._stderr_digest.hexdigest(),
+                                 "stderr_categories": sorted(self._stderr_categories)})
+                metadata = {"native_openclaw": True, "config_sha256": self.config_sha256,
+                            "native_evidence": evidence, "worker": deepcopy(self._worker_metadata)}
+                self.events.append({**deepcopy(metadata), "status": "failed", "kind": kind})
                 self._closed = True
-                raise NativeOpenClawError("native-worker-failure") from None
+                raise NativeOpenClawError(kind, metadata=metadata) from None
 
     async def __call__(self, url, payload, headers, timeout):
         # Headers are deliberately ignored. Native OpenClaw resolves its own
@@ -305,9 +453,9 @@ class NativeOpenClawTransport:
                 "--cwd", str(self.workspace_path), "--model", self.provider + "/" + self.model,
                 "--code-mode", "direct", "--thinking", "off", "--timeout", str(math.ceil(timeout)),
                 "--message-file", "-", "--json"]
-        worker_metadata = None
+        worker_metadata, native_evidence = None, None
         if self.warm_worker:
-            stdout, stderr, exit_code, worker_metadata = await self._worker_call(stdin, timeout)
+            stdout, stderr, exit_code, worker_metadata, native_evidence = await self._worker_call(stdin, timeout)
         else:
             process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -336,6 +484,8 @@ class NativeOpenClawTransport:
                     "native_budget_contract": deepcopy(self.budget_contract)}
         if worker_metadata:
             metadata["worker"] = worker_metadata
+        if native_evidence:
+            metadata["native_evidence"] = native_evidence
         if exit_code != 0 or envelope.get("ok") is not True or envelope.get("status") != "ok":
             self.events.append({**metadata, "status": "failed", "kind": "native-run-error"})
             raise NativeOpenClawError("native-run-error", metadata=metadata)
@@ -433,7 +583,11 @@ class NativeOpenClawPool:
             self.events.append(deepcopy(metadata))
             return response
         except asyncio.CancelledError:
-            self.events.append({"status": "cancelled", "pool_worker_index": index,
+            evidence = {}
+            worker_events = getattr(worker, "events", [])
+            if worker_events and worker_events[-1].get("status") == "cancelled":
+                evidence = {"native_evidence": deepcopy(worker_events[-1].get("native_evidence", {}))}
+            self.events.append({**evidence, "status": "cancelled", "pool_worker_index": index,
                                 "elapsed_seconds": perf_counter() - started})
             raise
         except Exception as exc:

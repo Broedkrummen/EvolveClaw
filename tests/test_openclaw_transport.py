@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 import shutil
 import subprocess
+from hashlib import sha256
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,10 +12,8 @@ from unittest.mock import patch
 
 from evaluation.openclaw_transport import (
     NativeBudgetUnsupported, NativeOpenClawError, NativeOpenClawTransport, NativeOpenClawPool,
-    build_native_config, convert_native_usage, prepare_native_workspace,
+    NATIVE_ENTRY_SHA256, build_native_config, convert_native_usage, prepare_native_workspace,
 )
-
-
 def envelope(**changes):
     value = {"ok": True, "status": "ok", "final": '{"answer":{"completed":false}}',
              "provider": "xiaomi-token-plan", "model": "mimo-v2.6-flash", "assistantTurns": 1,
@@ -196,6 +195,64 @@ class NativeTransportTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(json.loads(result.stdout)["error_kind"], "native-worker-version-or-source-admission")
             self.assertNotIn("MUST_NOT_EXECUTE", result.stdout.decode())
+
+    def test_warm_failure_evidence_preserves_actual_exit_and_sanitizes_fatal_stderr(self):
+        sentinel = "FAKE_PRIVATE_DIAGNOSTIC_DO_NOT_EXPOSE"
+        marker = "sqlite_wal_sidecar_identity_mismatch"
+        stderr_text = sentinel * 12000 + marker
+        for action, code in (("os.kill(os.getpid(),signal.SIGKILL)", -9), ("sys.exit(17)", 17)):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                transport, _, paths = self.setup_cli(directory)
+                node = directory / "offline-node"
+                node.write_text("#!/usr/bin/env python3\nimport json,os,sys,signal\n"
+                    + f"metadata={{'openclaw_version':'2026.10.2','entry_source_sha256':{NATIVE_ENTRY_SHA256!r}}}\n"
+                    + "print(json.dumps({'ready':True,'metadata':metadata}),flush=True)\n"
+                    + "request=json.loads(sys.stdin.readline())\n"
+                    + "telemetry={'pid':os.getpid(),'request_index':1,'rss_bytes':12345,'heap_used_bytes':456,'secret':'" + sentinel + "','active_resource_counts':{'Timeout':2,'" + sentinel + "':99}}\n"
+                    + "print(json.dumps({'id':request['id'],'event':'request-started','telemetry':telemetry}),flush=True)\n"
+                    + f"os.write(2,{stderr_text.encode()!r})\n" + action + "\n")
+                node.chmod(0o700)
+                warm = NativeOpenClawTransport(transport.cli_path, paths["config_path"], paths["workspace_path"],
+                    model="mimo-v2.6-flash", max_output_tokens=256, warm_worker=True, node_path=node)
+                with self.assertRaisesRegex(NativeOpenClawError, "protocol-eof") as caught:
+                    self.request(warm)
+                evidence = caught.exception.metadata["native_evidence"]
+                self.assertEqual(evidence["process"]["process_returncode"], code)
+                self.assertEqual(evidence["process"].get("process_exit_signal_number"), 9 if code == -9 else None)
+                self.assertIsNone(evidence["cleanup"]["signal_sent"])
+                self.assertEqual(evidence["stderr_categories"], ["sqlite-wal-sidecar-identity-mismatch"])
+                self.assertEqual(evidence["stderr_bytes"], len(stderr_text.encode()))
+                self.assertEqual(evidence["stderr_sha256"], sha256(stderr_text.encode()).hexdigest())
+                self.assertEqual(evidence["stderr_retained_bytes"], 0)
+                self.assertEqual(evidence["last_worker_telemetry"]["active_resource_counts"], {"Timeout": 2})
+                self.assertEqual(evidence["last_worker_telemetry"]["rss_bytes"], 12345)
+                self.assertNotIn(sentinel, json.dumps(caught.exception.metadata))
+                self.assertNotIn(sentinel, json.dumps(warm.events))
+                self.assertIsNone(warm._worker)
+
+    def test_warm_protocol_failure_does_not_mistake_adapter_termination_for_cause(self):
+        for action, kind in (("os.close(1); time.sleep(60)", "protocol-eof"),
+                             ("print('PRIVATE_NOT_JSON',flush=True); time.sleep(60)", "invalid-json")):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                transport, _, paths = self.setup_cli(directory)
+                node = directory / "offline-node"
+                node.write_text("#!/usr/bin/env python3\nimport json,os,sys,time\n"
+                    + f"metadata={{'openclaw_version':'2026.10.2','entry_source_sha256':{NATIVE_ENTRY_SHA256!r}}}\n"
+                    + "print(json.dumps({'ready':True,'metadata':metadata}),flush=True)\n"
+                    + "request=json.loads(sys.stdin.readline())\n" + action + "\n")
+                node.chmod(0o700)
+                warm = NativeOpenClawTransport(transport.cli_path, paths["config_path"], paths["workspace_path"],
+                    model="mimo-v2.6-flash", max_output_tokens=256, warm_worker=True, node_path=node)
+                with self.assertRaisesRegex(NativeOpenClawError, kind) as caught:
+                    self.request(warm)
+                evidence = caught.exception.metadata["native_evidence"]
+                self.assertIsNone(evidence["process"]["process_returncode"])
+                self.assertEqual(evidence["cleanup"]["signal_sent"], "SIGTERM")
+                self.assertEqual(evidence["cleanup"]["process_returncode_after_cleanup"], -15)
+                self.assertNotIn("PRIVATE_NOT_JSON", json.dumps(caught.exception.metadata))
+
 
     def test_pool_overlaps_independent_workers_preserves_identity_and_shared_limits(self):
         active, maximum, created = 0, 0, []

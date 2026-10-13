@@ -256,6 +256,12 @@ class ModelIntegrationTests(unittest.TestCase):
                      "final": "private-response", "headers": {"Authorization": "private-header"}, "stderr": "private-diagnostic",
                      "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110,
                                "prompt_tokens_details": {"cached_tokens": 80}, "private": "not-exported"},
+                     "native_evidence": {"phase": "reply", "stderr_bytes": 128,
+                         "raw_stderr": "private-diagnostic", "stderr_categories": ["sqlite-wal-sidecar-fatal", "not-exported"],
+                         "process": {"process_returncode": -9, "environment": "not-exported"},
+                         "last_worker_telemetry": {"rss_bytes": 1024, "private": "not-exported"},
+                         "request_started_telemetry": {"rss_bytes": 512},
+                         "cleanup": {"process_returncode_after_cleanup": -9, "signal_sent": None, "private": "not-exported"}},
                      "worker": {"openclaw_version": "2026.10.2", "entry_source_sha256": "entry-hash",
                                 "internal_entry": True, "persistent_worker": True, "model_requests_serialized": True,
                                 "private": "not-exported"}}])
@@ -265,6 +271,28 @@ class ModelIntegrationTests(unittest.TestCase):
             self.assertNotIn(private, text)
         self.assertEqual(evidence["worker"]["entry_source_sha256"], "entry-hash")
         self.assertEqual(evidence["events"][0]["usage"]["total_tokens"], 110)
+        diagnostic = evidence["events"][0]["native_evidence"]
+        self.assertEqual(diagnostic["process"]["process_returncode"], -9)
+        self.assertEqual(diagnostic["stderr_categories"], ["sqlite-wal-sidecar-fatal"])
+        self.assertEqual(diagnostic["request_started_telemetry"]["rss_bytes"], 512)
+
+    def test_failed_job_fences_dispatch_before_queued_condition_acquires_slot(self):
+        transport = FixtureTransport()
+        async def failing_sequence(sequence, condition, directory, model, max_steps):
+            if condition == "learning-off":
+                await asyncio.sleep(0)
+                raise RuntimeError("Observed sequence failure")
+            await model.generate([{"role": "user", "content": "A queued condition must not dispatch."}])
+            raise AssertionError("A blocked model call returned")
+        with tempfile.TemporaryDirectory() as tmp, patch("evaluation.run_models._run_sequence", side_effect=failing_sequence):
+            output = Path(tmp) / "failed-queue"
+            with self.assertRaises(RuntimeError):
+                asyncio.run(run_model_evaluation(configuration(), output,
+                    conditions=("learning-off", "improved"), sequence_limit=1,
+                    transport=transport, offline_mock=True, max_concurrent_sequences=1))
+            aborted = json.loads((output / "incomplete.json").read_text())
+            self.assertEqual(aborted["usage"]["request_count"], 0)
+            self.assertEqual(transport.requests, [])
 
     def test_execution_requires_explicit_mode_before_creating_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

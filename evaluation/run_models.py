@@ -51,11 +51,12 @@ def native_transport_evidence(transport):
     """Allowlisted host provenance only: no model text, headers, or diagnostics."""
     fields = {"native_openclaw", "exit_code", "config_sha256", "status", "kind", "provider", "model",
               "assistantTurns", "reported_tool_calls", "tool_denial_source", "native_usage_status",
-              "elapsed_seconds", "worker_index"}
+              "elapsed_seconds", "worker_index", "pool_worker_index", "pool_worker_count", "queue_seconds"}
     contract_fields = {"supports_strict_reservation", "native_input_overhead_tokens", "input_limit_configured",
         "output_cap_configured", "max_provider_attempts", "adapter_retries", "native_project_retry_disabled",
         "sampling_temperature_configured", "guarantee", "role_fidelity", "worker_pool_size",
-        "independent_workers", "model_requests_parallel", "model_requests_serialized_per_worker"}
+        "independent_workers", "model_requests_parallel", "model_requests_serialized_per_worker",
+        "native_worker_count", "maximum_concurrent_native_requests", "independent_ephemeral_run_state"}
     worker_fields = {"openclaw_version", "entry_file", "entry_source_sha256", "internal_entry",
                      "persistent_worker", "model_requests_serialized"}
     def scalar(value):
@@ -69,6 +70,32 @@ def native_transport_evidence(transport):
         safe = selected(event, fields)
         safe["native_budget_contract"] = selected(event.get("native_budget_contract"), contract_fields)
         safe["worker"] = selected(event.get("worker"), worker_fields)
+        diagnostic = event.get("native_evidence")
+        if isinstance(diagnostic, dict):
+            from .openclaw_transport import _safe_worker_telemetry, _STDERR_MARKERS
+            safe_diagnostic = selected(diagnostic, {"phase", "worker_generation", "request_index",
+                "bridge_source_sha256", "entry_source_sha256", "stderr_bytes", "stderr_sha256",
+                "stderr_retained_bytes"})
+            process = diagnostic.get("process")
+            process = process if isinstance(process, dict) else {}
+            safe_diagnostic["process"] = {key: process[key] for key in
+                ("pid", "process_returncode", "process_exit_signal_number", "rss_bytes",
+                 "rss_high_water_bytes", "thread_count", "file_descriptor_count")
+                if key in process and (process[key] is None or type(process[key]) is int)}
+            safe_diagnostic["last_worker_telemetry"] = _safe_worker_telemetry(diagnostic.get("last_worker_telemetry"))
+            safe_diagnostic["request_started_telemetry"] = _safe_worker_telemetry(diagnostic.get("request_started_telemetry"))
+            categories = diagnostic.get("stderr_categories")
+            safe_diagnostic["stderr_categories"] = [kind for kind in (categories if isinstance(categories, list) else [])
+                if isinstance(kind, str) and kind in _STDERR_MARKERS]
+            cleanup = diagnostic.get("cleanup")
+            cleanup = cleanup if isinstance(cleanup, dict) else {}
+            safe_cleanup = {key: cleanup[key] for key in
+                ("process_returncode_before_cleanup", "process_returncode_after_cleanup")
+                if key in cleanup and (cleanup[key] is None or type(cleanup[key]) is int)}
+            if cleanup.get("signal_sent") in (None, "SIGTERM", "SIGKILL"):
+                safe_cleanup["signal_sent"] = cleanup.get("signal_sent")
+            safe_diagnostic["cleanup"] = safe_cleanup
+            safe["native_evidence"] = safe_diagnostic
         usage = event.get("usage") or {}
         safe_usage = selected(usage, {"prompt_tokens", "completion_tokens", "total_tokens", "native_unsupported_cache_write"})
         for key, detail in (("prompt_tokens_details", "cached_tokens"), ("completion_tokens_details", "reasoning_tokens")):
@@ -581,7 +608,14 @@ async def run_model_evaluation(config, output: Path, *, split="pilot", condition
     async def execute_job(index, repetition, condition, sequence):
         async with semaphore:
             directory = output / f"run-{repetition:03d}" / condition / sequence.sequence_id
-            result = await _run_sequence(sequence, condition, directory, model, max_steps)
+            try:
+                result = await _run_sequence(sequence, condition, directory, model, max_steps)
+            except BaseException:
+                # Fence reservations before releasing this job's semaphore:
+                # otherwise a queued condition can dispatch before gather
+                # delivers the failure to the coordinator.
+                model.ledger.block("Evaluation aborted; no further requests may be issued")
+                raise
             result["repetition"] = repetition
             finished[index] = result
             results[:] = [finished[key] for key in sorted(finished)]
