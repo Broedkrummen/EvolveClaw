@@ -12,7 +12,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     pilot = sub.add_parser("pilot", help="Run 20 scripted sequences across 3 isolated conditions; no model calls")
     pilot.add_argument("--output", required=True, type=Path, help="New output directory; existing directories are never overwritten")
-    manifest = sub.add_parser("manifest", help="Export authored pilot and planned development/held-out authoring slots")
+    manifest = sub.add_parser("manifest", help="Export authored pilot/development fixtures and planned held-out slots")
     manifest.add_argument("--output", required=True, type=Path)
     storage = sub.add_parser("storage-smoke", help="Check actual MemoryStore with authored lessons in isolated data; no models")
     storage.add_argument("--output", required=True, type=Path)
@@ -40,7 +40,7 @@ def main():
         with args.output.open("x") as output:
             json.dump({"schema_version": 1, "sequences": rows}, output, indent=2)
             output.write("\n")
-        print("Exported authoring manifest. Only pilot rows have executable fixtures.")
+        print("Exported authoring manifest. Pilot and development fixtures are authored; held-out rows remain planned.")
 
 
 if __name__ == "__main__":

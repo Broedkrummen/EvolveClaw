@@ -126,7 +126,10 @@ class ScopeSDKReference:
         _json_write(self.directory / "reference_events.json", self.events)
         if self.metadata["model_mode"] == "real-opt-in":
             budget = self.model.ledger.snapshot()
-            self.metadata["live_api_calls"] = sum(not call["injected_transport"] for call in budget["calls"])
+            native = any(call.get("transport_kind") == "native-openclaw" for call in budget["calls"])
+            self.metadata["live_api_calls"] = None if native else sum(not call["injected_transport"] for call in budget["calls"])
+            self.metadata["model_execution_requests"] = budget["request_count"]
+            self.metadata["provider_attempt_count_status"] = "unknown-native-host" if native else "recorded-direct-requests"
             self.metadata["budget"] = budget
             _json_write(self.directory / "reference_metadata.json", self.metadata)
         return result

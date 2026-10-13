@@ -50,7 +50,8 @@ class EvaluationTests(unittest.TestCase):
         for split, count in (("pilot", 20), ("development", 100), ("heldout", 500)):
             self.assertEqual(sum(row["split"] == split for row in rows), count)
         self.assertEqual(len({s.cluster_id for s in pilot_sequences()}), 10)
-        self.assertTrue(all(row["fixture_status"] == "planned" for row in rows if row["split"] != "pilot"))
+        self.assertTrue(all(row["fixture_status"] == "planned" for row in rows if row["split"] == "heldout"))
+        self.assertTrue(all(row["fixture_status"] == "authored" for row in rows if row["split"] == "development"))
         corrupt = [dict(rows[0]), {**rows[0], "sequence_id": "different", "split": "heldout"}]
         with self.assertRaisesRegex(ValueError, "crosses splits"):
             validate_manifest(corrupt)
@@ -187,6 +188,105 @@ class EvaluationTests(unittest.TestCase):
                 asyncio.run(live_model.generate([{"role": "user", "content": "hello"}]))
         self.assertEqual(len(requests), 1)
         config.validate(require_opt_in=False)
+
+    def test_token_only_mimo_counts_cached_and_reasoning_tokens_once(self):
+        from evaluation.models import BudgetedModel, ModelConfig
+        requests = []
+        async def transport(url, payload, headers, timeout):
+            requests.append(payload)
+            return {"choices": [{"message": {"content": "{}"}}],
+                    "usage": {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
+                              "prompt_tokens_details": {"cached_tokens": 800},
+                              "completion_tokens_details": {"reasoning_tokens": 30}, "cost": {"total": 0}}}
+        config = ModelConfig("xiaomi-mimo", "mimo-v2.6-flash", "https://api.xiaomimimo.com/v1", "EXPLICIT_TEST_KEY",
+                             max_input_tokens=8192, max_output_tokens=128, max_total_tokens=40_000,
+                             max_quota_credits=2_000_000, quota_uncached_input_credits=100,
+                             quota_cached_input_credits=2, quota_output_credits=200, opt_in=True)
+        model = BudgetedModel(config, transport=transport)
+        asyncio.run(model.generate([{"role": "user", "content": "hello"}]))
+        self.assertEqual(requests[0]["max_completion_tokens"], 128)
+        self.assertEqual(requests[0]["thinking"], {"type": "disabled"})
+        self.assertNotIn("max_tokens", requests[0])
+        usage = model.ledger.snapshot()
+        self.assertEqual(usage["accounted_total_tokens"], 1100)
+        self.assertEqual(usage["accounted_quota_credits"], 41_600)
+        self.assertIsNone(usage["accounted_budget_usd"])
+        self.assertEqual(usage["cost_status"], "unknown")
+        self.assertEqual(usage["calls"][0]["reasoning_tokens"], 30)
+
+    def test_token_and_credit_caps_keep_unknown_reservations_across_stages(self):
+        from evaluation.models import BudgetExceeded, BudgetedModel, ModelConfig
+        for caps in ({"max_total_tokens": 9000, "max_quota_credits": 2_000_000},
+                     {"max_total_tokens": 40_000, "max_quota_credits": 900_000}):
+            calls = []
+            async def transport(*args):
+                calls.append(args)
+                return {"choices": [{"message": {"content": "{}"}}]}
+            config = ModelConfig("xiaomi-mimo", "mimo-v2.6-flash", "https://api.xiaomimimo.com/v1", "EXPLICIT_TEST_KEY",
+                max_input_tokens=8192, max_output_tokens=128, quota_uncached_input_credits=100,
+                quota_cached_input_credits=2, quota_output_credits=200, opt_in=True, **caps)
+            model = BudgetedModel(config, transport=transport)
+            asyncio.run(model.for_stage("solver").generate([{"role": "user", "content": "first"}]))
+            with self.assertRaises(BudgetExceeded):
+                asyncio.run(model.for_stage("paper:reflection").generate([{"role": "user", "content": "second"}]))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(model.ledger.snapshot()["reserved_unknown_tokens"], 8320)
+            self.assertEqual(model.ledger.snapshot()["accounted_quota_credits"], 844_800)
+            self.assertIsNone(model.ledger.snapshot()["accounted_budget_usd"])
+
+    def test_unknown_cache_is_uncached_and_invalid_usage_cannot_release_budget(self):
+        from evaluation.models import BudgetExceeded, BudgetedModel, ModelConfig
+        config = ModelConfig("xiaomi-mimo", "mimo-v2.6-flash", "https://api.xiaomimimo.com/v1", "EXPLICIT_TEST_KEY",
+            max_input_tokens=8192, max_output_tokens=128, max_total_tokens=40_000,
+            max_quota_credits=2_000_000, quota_uncached_input_credits=100,
+            quota_cached_input_credits=2, quota_output_credits=200, opt_in=True)
+        async def transport(*args):
+            return {"choices": [{"message": {"content": "{}"}}],
+                    "usage": {"prompt_tokens": 1000, "completion_tokens": 100}}
+        model = BudgetedModel(config, transport=transport)
+        asyncio.run(model.generate([{"role": "user", "content": "hello"}]))
+        self.assertEqual(model.ledger.snapshot()["accounted_quota_credits"], 120_000)
+        self.assertEqual(model.ledger.snapshot()["calls"][0]["cache_accounting"], "unknown-assumed-uncached")
+        async def bad_transport(*args):
+            return {"choices": [{"message": {"content": "{}"}}],
+                    "usage": {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1}}
+        model = BudgetedModel(config, transport=bad_transport)
+        with self.assertRaises(BudgetExceeded):
+            asyncio.run(model.generate([{"role": "user", "content": "hello"}]))
+        self.assertEqual(model.ledger.snapshot()["reserved_unknown_tokens"], 8320)
+        self.assertEqual(model.ledger.snapshot()["accounted_quota_credits"], 844_800)
+
+    def test_token_plan_requires_native_auth_and_never_reads_an_env_secret(self):
+        from evaluation.models import BudgetedModel, ModelConfig
+        from dataclasses import replace
+        config = ModelConfig("xiaomi-mimo", "mimo-v2.6-flash", "https://token-plan-ams.xiaomimimo.com/v1", "OPENCLAW_MANAGED_AUTH",
+            max_input_tokens=8192, max_output_tokens=128, max_total_tokens=40_000,
+            max_quota_credits=2_000_000, quota_uncached_input_credits=100,
+            quota_cached_input_credits=2, quota_output_credits=200, opt_in=True,
+            execution_backend="native-openclaw")
+        with self.assertRaisesRegex(ValueError, "direct HTTP"):
+            replace(config, execution_backend="direct-http").validate()
+        with self.assertRaisesRegex(ValueError, "cannot fall back"):
+            BudgetedModel(config)
+        class Native:
+            native_openclaw = True
+            budget_contract = {"native_input_overhead_tokens": None, "max_provider_attempts": None}
+            async def __call__(self, url, payload, headers, timeout):
+                self.headers = headers
+                return {"choices": [{"message": {"content": "{}"}}],
+                        "usage": {"prompt_tokens": 100, "completion_tokens": 10}}
+        native = Native()
+        import os
+        original_get = os.environ.get
+        def no_native_secret(name, default=None):
+            if name == "OPENCLAW_MANAGED_AUTH":
+                raise AssertionError("No native secret lookup")
+            return original_get(name, default)
+        with patch("evaluation.models.os.environ.get", side_effect=no_native_secret):
+            model = BudgetedModel(config, transport=native, transport_kind="native-openclaw")
+            asyncio.run(model.generate([{"role": "user", "content": "hello"}]))
+        self.assertEqual(native.headers, {"Content-Type": "application/json"})
+        self.assertEqual(model.ledger.snapshot()["calls"][0]["transport_kind"], "native-openclaw")
 
     def test_real_agent_uses_only_fake_observations_and_next_step_guidance(self):
         from evaluation.models import ModelReply

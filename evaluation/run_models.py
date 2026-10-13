@@ -17,6 +17,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import json
+import math
 from pathlib import Path
 from statistics import mean
 import subprocess
@@ -44,6 +45,42 @@ APPLICATION_SETTINGS = {
 
 def _write(path: Path, value: Any):
     path.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n")
+
+
+def native_transport_evidence(transport):
+    """Allowlisted host provenance only: no model text, headers, or diagnostics."""
+    fields = {"native_openclaw", "exit_code", "config_sha256", "status", "kind", "provider", "model",
+              "assistantTurns", "reported_tool_calls", "tool_denial_source", "native_usage_status",
+              "elapsed_seconds", "worker_index"}
+    contract_fields = {"supports_strict_reservation", "native_input_overhead_tokens", "input_limit_configured",
+        "output_cap_configured", "max_provider_attempts", "adapter_retries", "native_project_retry_disabled",
+        "sampling_temperature_configured", "guarantee", "role_fidelity", "worker_pool_size",
+        "independent_workers", "model_requests_parallel", "model_requests_serialized_per_worker"}
+    worker_fields = {"openclaw_version", "entry_file", "entry_source_sha256", "internal_entry",
+                     "persistent_worker", "model_requests_serialized"}
+    def scalar(value):
+        return value is None or isinstance(value, (str, int, bool)) or (isinstance(value, float) and math.isfinite(value))
+    def selected(value, names):
+        return {key: value[key] for key in names if key in value and scalar(value[key])} if isinstance(value, dict) else {}
+    events = []
+    for event in getattr(transport, "events", []):
+        if not isinstance(event, dict):
+            continue
+        safe = selected(event, fields)
+        safe["native_budget_contract"] = selected(event.get("native_budget_contract"), contract_fields)
+        safe["worker"] = selected(event.get("worker"), worker_fields)
+        usage = event.get("usage") or {}
+        safe_usage = selected(usage, {"prompt_tokens", "completion_tokens", "total_tokens", "native_unsupported_cache_write"})
+        for key, detail in (("prompt_tokens_details", "cached_tokens"), ("completion_tokens_details", "reasoning_tokens")):
+            details = selected(usage.get(key), {detail}) if isinstance(usage, dict) else {}
+            if details:
+                safe_usage[key] = details
+        safe["usage"] = safe_usage
+        events.append(safe)
+    worker = next((event["worker"] for event in reversed(events) if event["worker"]), {})
+    return {"native_openclaw": True, "config_sha256": getattr(transport, "config_sha256", None),
+            "budget_contract": selected(getattr(transport, "budget_contract", None), contract_fields),
+            "worker": worker, "events": events}
 
 
 def _module(path: Path, name: str):
@@ -302,12 +339,24 @@ def _session(sequence_id, scope):
     return sha256(json.dumps([sequence_id, scope], sort_keys=True).encode()).hexdigest()
 
 
-def selected_sequences(split, sequence_limit=None):
+def selected_sequences(split, sequence_limit=None, sequence_ids=None):
     if split not in ("pilot", "development", "heldout"):
         raise ValueError("Unknown evaluation split")
-    sequences = [s for s in pilot_sequences() if s.split == split]
+    if split == "development":
+        from .development_scenarios import development_sequences
+        sequences = list(development_sequences())
+    else:
+        sequences = [s for s in pilot_sequences() if s.split == split]
     if not sequences:
         raise ValueError(f"{split} has planned authoring slots only; no executable fixtures")
+    if sequence_ids is not None:
+        if not sequence_ids or len(set(sequence_ids)) != len(sequence_ids):
+            raise ValueError("Select unique nonempty sequence IDs")
+        by_id = {sequence.sequence_id: sequence for sequence in sequences}
+        unknown = [sequence_id for sequence_id in sequence_ids if sequence_id not in by_id]
+        if unknown:
+            raise ValueError(f"Sequence IDs are not authored in the selected split: {', '.join(unknown)}")
+        sequences = [by_id[sequence_id] for sequence_id in sequence_ids]
     if sequence_limit is not None:
         if isinstance(sequence_limit, bool) or sequence_limit < 1:
             raise ValueError("sequence_limit must be positive")
@@ -315,12 +364,12 @@ def selected_sequences(split, sequence_limit=None):
     return sequences
 
 
-def evaluation_plan(config, *, split="pilot", conditions=CONDITIONS, repetitions=1, sequence_limit=None):
+def evaluation_plan(config, *, split="pilot", conditions=CONDITIONS, repetitions=1, sequence_limit=None, sequence_ids=None):
     if not conditions or len(set(conditions)) != len(conditions) or any(c not in CONDITIONS for c in conditions):
         raise ValueError("Select unique supported conditions")
     if isinstance(repetitions, bool) or not isinstance(repetitions, int) or repetitions < 1:
         raise ValueError("repetitions must be a positive integer")
-    sequences = selected_sequences(split, sequence_limit)
+    sequences = selected_sequences(split, sequence_limit, sequence_ids)
     validate_manifest(planned_manifest())
     config.validate(require_opt_in=False)
     public_count = sum(sum(isinstance(e, (Task, Feedback)) for e in s.events) for s in sequences)
@@ -333,6 +382,10 @@ def evaluation_plan(config, *, split="pilot", conditions=CONDITIONS, repetitions
             "assistant_runs_before_tool_continuations": public_count * repetitions *
                 sum(2 if c == "scope_paper_k2_n2" else 1 for c in conditions),
             "model_configuration": asdict(config),
+            "provider_settings": {"output_limit_parameter": "max_completion_tokens" if config.provider == "xiaomi-mimo" else "max_tokens",
+                                  "thinking": "disabled" if config.provider == "xiaomi-mimo" else "not-configured",
+                                  "quota_off_peak_discount_applied": False,
+                                  "currency_pricing_status": "unknown" if config.input_usd_per_million is None else "explicit-configured-rates"},
             "baseline_commit": HISTORICAL_V02_COMMIT,
             "memory_namespace_policies": {
                 "repaired-v0.2": "agent-wide-strategic; session-tactical",
@@ -341,8 +394,8 @@ def evaluation_plan(config, *, split="pilot", conditions=CONDITIONS, repetitions
                 "scope_paper_k2_n2": "sequence-only-experiment; role-and-perspective; no-user-project-routing"},
             "cost_estimate": {"status": "unknown", "amount": None,
                               "reason": "Learning proposals, continuation steps, and consolidation vary by run"},
-            "execution_limits": ["Fixture agent, not native OpenClaw runtime",
-                "Only the 20 authored pilot sequences are executable",
+            "execution_limits": ["Fake-tool fixture agent; native backend adds OpenClaw model execution, not live task tools",
+                "Pilot/development fixtures are authored; held-out authoring slots remain nonexecutable",
                 "Paper K2/N2 and role-step hierarchy with authored executor prompts, not an exact benchmark reproduction",
                 "Paper primary response is preselected efficiency; no gold-answer best-of-perspectives selector",
                 "No evaluator success labels are supplied to any learner"]}
@@ -362,8 +415,15 @@ def _condition_reports(results, conditions, usage):
             "usage": {"requests": len(requests),
                       "assistant_requests": sum(":assistant" in call["stage"] for call in requests),
                       "learning_requests": sum(call["stage"].endswith(":learning") for call in requests),
-                      "unknown_usage_requests": sum(call["usage_status"] == "unknown" for call in requests),
-                      "accounted_budget_usd": sum(call["accounted_cost_usd"] for call in requests)},
+                      "unknown_usage_requests": sum(not call["usage_status"].startswith("actual") for call in requests),
+                      "accounted_budget_usd": (sum(call["accounted_cost_usd"] for call in requests)
+                                                if requests and all(call["accounted_cost_usd"] is not None for call in requests) else None),
+                      "cost_status": "estimated-at-configured-prices" if requests and all(call["accounted_cost_usd"] is not None for call in requests) else "unknown",
+                      "accounted_total_tokens": sum(call["accounted_total_tokens"] or 0 for call in requests),
+                      "known_total_tokens": sum(call["total_tokens"] or 0 for call in requests),
+                      "reserved_unknown_tokens": sum(call["accounted_total_tokens"] or 0 for call in requests if call["total_tokens"] is None),
+                      "accounted_quota_credits": (sum(call["accounted_quota_credits"] for call in requests)
+                                                   if requests and all(call["accounted_quota_credits"] is not None for call in requests) else None)},
             "latency_seconds": {"task_runs": len(elapsed), "mean": mean(elapsed), "maximum": max(elapsed)}}
     return reports
 
@@ -479,41 +539,68 @@ async def _run_sequence(sequence, condition, directory, model, max_steps):
 
 
 async def run_model_evaluation(config, output: Path, *, split="pilot", conditions=CONDITIONS,
-                               repetitions=1, sequence_limit=None, max_steps=5,
-                               transport=None, offline_mock=False):
+                               repetitions=1, sequence_limit=None, sequence_ids=None, max_steps=5,
+                               transport=None, offline_mock=False, max_concurrent_sequences=1):
     """Execution requires opt-in, except explicitly marked injected mock mode."""
     from .models import BudgetedModel
     plan = evaluation_plan(config, split=split, conditions=conditions, repetitions=repetitions,
-                           sequence_limit=sequence_limit)
+                           sequence_limit=sequence_limit, sequence_ids=sequence_ids)
     if offline_mock and transport is None:
         raise ValueError("offline_mock requires an injected transport")
-    if transport is not None and not offline_mock:
-        raise ValueError("Injected transports must be explicitly marked offline_mock")
+    native = config.execution_backend == "native-openclaw" and getattr(transport, "native_openclaw", False) is True
+    if transport is not None and not offline_mock and not native:
+        raise ValueError("Injected transports require offline_mock or the approved native OpenClaw backend")
+    if config.execution_backend == "native-openclaw" and not offline_mock and not native:
+        raise ValueError("Native execution requires an explicitly supplied approved OpenClaw transport")
     config.validate(require_opt_in=not offline_mock)
     if importlib.metadata.version("scope-optimizer") != SDK_VERSION:
         raise ValueError(f"Evaluation requires scope-optimizer=={SDK_VERSION}")
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
         raise ValueError("max_steps must be a positive integer")
+    if isinstance(max_concurrent_sequences, bool) or not isinstance(max_concurrent_sequences, int) or not 1 <= max_concurrent_sequences <= 4:
+        raise ValueError("max_concurrent_sequences must be an integer in [1,4]")
+    plan["max_concurrent_sequences"] = max_concurrent_sequences
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     _write(output / "plan.json", plan)
-    sequences = selected_sequences(split, sequence_limit)
+    sequences = selected_sequences(split, sequence_limit, sequence_ids)
     scorer = output / "scorer-only"
     scorer.mkdir()
     _write(scorer / "scoring_keys.json", {sequence.sequence_id: {
         task_id: asdict(key) for task_id, key in sequence.scoring_keys.items()} for sequence in sequences})
-    model = BudgetedModel(replace(config, opt_in=True) if offline_mock else config, transport=transport)
+    model = BudgetedModel(replace(config, opt_in=True) if offline_mock else config, transport=transport,
+                         transport_kind="offline-mock" if offline_mock else "native-openclaw" if native else None)
     results = []
+    finished = {}
+    semaphore = asyncio.Semaphore(max_concurrent_sequences)
+    jobs = []
+    for repetition in range(1, repetitions + 1):
+        for condition in conditions:
+            for sequence in sequences:
+                jobs.append((repetition, condition, sequence))
+    async def execute_job(index, repetition, condition, sequence):
+        async with semaphore:
+            directory = output / f"run-{repetition:03d}" / condition / sequence.sequence_id
+            result = await _run_sequence(sequence, condition, directory, model, max_steps)
+            result["repetition"] = repetition
+            finished[index] = result
+            results[:] = [finished[key] for key in sorted(finished)]
+            _write(output / "sequence_results.json", results)
+            if native:
+                _write(output / "native_execution.json", native_transport_evidence(transport))
+    tasks = [asyncio.create_task(execute_job(index, *job)) for index, job in enumerate(jobs)]
     try:
-        for repetition in range(1, repetitions + 1):
-            for condition in conditions:
-                for sequence in sequences:
-                    directory = output / f"run-{repetition:03d}" / condition / sequence.sequence_id
-                    result = await _run_sequence(sequence, condition, directory, model, max_steps)
-                    result["repetition"] = repetition
-                    results.append(result)
-                    _write(output / "sequence_results.json", results)
-    except Exception as exc:
+        await asyncio.gather(*tasks)
+    except BaseException as exc:
+        # Stop new reservations before cancellation: SDK helpers may otherwise
+        # swallow a failed request and continue an additional reflection stage.
+        model.ledger.block("Evaluation aborted; no further requests may be issued")
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if native:
+            _write(output / "native_execution.json", native_transport_evidence(transport))
         _write(output / "incomplete.json", {"status": "aborted", "error_type": type(exc).__name__,
                "completed_sequence_runs": len(results), "efficacy_evidence": False,
                "usage": model.ledger.snapshot()})
@@ -535,7 +622,13 @@ async def run_model_evaluation(config, output: Path, *, split="pilot", condition
     usage = model.ledger.snapshot()
     summary = {"schema_version": 1, "status": "completed", "split": split,
                "evidence_kind": "mock-provider-mechanics" if offline_mock else "real-model-fixture-pilot",
-               "live_api_calls": 0 if offline_mock else usage["request_count"],
+               "live_api_calls": 0 if offline_mock else None if native else usage["request_count"],
+               "model_execution_requests": usage["request_count"],
+               "provider_attempt_count_status": "unknown-native-host" if native and not offline_mock else "recorded-direct-requests",
+               "execution_backend": config.execution_backend,
+               "native_budget_contract": getattr(transport, "budget_contract", None) if native else None,
+               "native_execution": native_transport_evidence(transport) if native else None,
+               "max_concurrent_sequences": max_concurrent_sequences,
                "mock_provider": offline_mock, "surrogate_learning_algorithm": False,
                "scripted_model": offline_mock,
                "efficacy_evidence": False, "task_quality_measured": not offline_mock,
@@ -553,39 +646,97 @@ async def run_model_evaluation(config, output: Path, *, split="pilot", condition
 def main(argv=None):
     from .models import ModelConfig
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--execute", action="store_true", help="Explicitly enable paid calls; omission writes only a plan")
-    parser.add_argument("--provider", required=True, choices=("openai-compatible", "anthropic"))
+    parser.add_argument("--execute", action="store_true", help="Explicitly enable model/quota consumption; omission writes only a plan")
+    parser.add_argument("--provider", required=True, choices=("openai-compatible", "anthropic", "xiaomi-mimo"))
     parser.add_argument("--model", required=True)
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--api-key-env", required=True, help="Name of the secret environment variable, never the secret value")
-    parser.add_argument("--input-usd-per-million", required=True, type=float)
-    parser.add_argument("--output-usd-per-million", required=True, type=float)
-    parser.add_argument("--max-cost-usd", required=True, type=float)
+    parser.add_argument("--api-key-env", help="Direct HTTP only: name of the secret environment variable, never its value")
+    parser.add_argument("--input-usd-per-million", type=float)
+    parser.add_argument("--output-usd-per-million", type=float)
+    parser.add_argument("--max-cost-usd", type=float)
+    parser.add_argument("--max-total-tokens", type=int, help="Shared raw prompt+completion token ceiling, including cached input and reasoning once")
+    parser.add_argument("--max-quota-credits", type=int, help="Separate shared conservative subscription-credit ceiling")
+    parser.add_argument("--quota-uncached-input-credits", type=int)
+    parser.add_argument("--quota-cached-input-credits", type=int)
+    parser.add_argument("--quota-output-credits", type=int)
+    parser.add_argument("--execution-backend", choices=("direct-http", "native-openclaw"), default="direct-http")
+    parser.add_argument("--openclaw-cli", type=Path)
+    parser.add_argument("--openclaw-config", type=Path)
+    parser.add_argument("--openclaw-workspace", type=Path)
+    parser.add_argument("--openclaw-provider", default="xiaomi-token-plan")
+    parser.add_argument("--openclaw-warm-worker", action="store_true", help="Reuse pinned native imports in a sequential worker")
+    parser.add_argument("--node-path", "--openclaw-node", dest="node_path", type=Path, help="Explicit installed Node executable for the warm native worker")
+    parser.add_argument("--openclaw-workers", type=int, choices=range(1, 5), default=1)
+    parser.add_argument("--openclaw-worker-path", type=Path)
+    parser.add_argument("--require-strict-native-budget", action="store_true",
+                        help="Fail before native execution if the host cannot establish a strict input/attempt envelope")
     parser.add_argument("--max-calls", type=int, default=200)
     parser.add_argument("--max-input-tokens", type=int, default=32768)
     parser.add_argument("--max-output-tokens", type=int, default=1024)
     parser.add_argument("--timeout-seconds", type=float, default=60)
     parser.add_argument("--temperature", type=float, default=.3)
     parser.add_argument("--max-steps", type=int, default=5)
+    parser.add_argument("--max-concurrent-sequences", type=int, choices=range(1, 5), default=1)
     parser.add_argument("--split", required=True, choices=("pilot", "development", "heldout"))
     parser.add_argument("--conditions", nargs="+", choices=CONDITIONS, default=list(CONDITIONS))
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--sequence-limit", type=int)
+    parser.add_argument("--sequence-id", action="append", dest="sequence_ids", help="Select an exact authored sequence; repeat for multiple cases")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
+    if args.execution_backend == "direct-http" and not args.api_key_env:
+        parser.error("--api-key-env is required for direct HTTP")
+    if args.execution_backend == "native-openclaw" and args.execute and not all((args.openclaw_cli, args.openclaw_config, args.openclaw_workspace)):
+        parser.error("Native execution requires --openclaw-cli, --openclaw-config, and --openclaw-workspace")
+    if args.openclaw_warm_worker and args.execution_backend != "native-openclaw":
+        parser.error("The warm worker requires --execution-backend native-openclaw")
+    if args.openclaw_warm_worker and args.execute and not args.node_path:
+        parser.error("Warm native execution requires an explicit --node-path")
+    if args.openclaw_workers > 1 and (args.execution_backend != "native-openclaw" or not args.openclaw_warm_worker):
+        parser.error("Multiple native workers require the native backend and --openclaw-warm-worker")
     config = ModelConfig(provider=args.provider, model=args.model, base_url=args.base_url,
-                         api_key_env=args.api_key_env, max_cost_usd=args.max_cost_usd,
+                         api_key_env=args.api_key_env or "OPENCLAW_MANAGED_AUTH", max_cost_usd=args.max_cost_usd,
                          input_usd_per_million=args.input_usd_per_million,
                          output_usd_per_million=args.output_usd_per_million,
                          max_input_tokens=args.max_input_tokens, max_output_tokens=args.max_output_tokens,
                          max_calls=args.max_calls, timeout_seconds=args.timeout_seconds,
-                         temperature=args.temperature, opt_in=args.execute)
+                         temperature=args.temperature, opt_in=args.execute,
+                         max_total_tokens=args.max_total_tokens, max_quota_credits=args.max_quota_credits,
+                         quota_uncached_input_credits=args.quota_uncached_input_credits,
+                         quota_cached_input_credits=args.quota_cached_input_credits,
+                         quota_output_credits=args.quota_output_credits, execution_backend=args.execution_backend)
     options = dict(split=args.split, conditions=tuple(args.conditions), repetitions=args.repetitions,
-                   sequence_limit=args.sequence_limit)
+                   sequence_limit=args.sequence_limit, sequence_ids=args.sequence_ids)
     if args.execute:
-        result = asyncio.run(run_model_evaluation(config, args.output, max_steps=args.max_steps, **options))
+        transport = None
+        if args.execution_backend == "native-openclaw":
+            from .openclaw_transport import NativeOpenClawTransport
+            native_options = dict(model=args.model, provider=args.openclaw_provider, base_url=args.base_url,
+                max_input_tokens=args.max_input_tokens, max_output_tokens=args.max_output_tokens,
+                require_strict_budget=args.require_strict_native_budget,
+                node_path=args.node_path, worker_path=args.openclaw_worker_path)
+            if args.openclaw_workers > 1:
+                from .openclaw_transport import NativeOpenClawPool
+                transport = NativeOpenClawPool(args.openclaw_cli, args.openclaw_config, args.openclaw_workspace,
+                                              workers=args.openclaw_workers, **native_options)
+            else:
+                transport = NativeOpenClawTransport(args.openclaw_cli, args.openclaw_config, args.openclaw_workspace,
+                                                   warm_worker=args.openclaw_warm_worker, **native_options)
+        async def execute_and_close():
+            try:
+                return await run_model_evaluation(config, args.output, max_steps=args.max_steps, transport=transport,
+                                                  max_concurrent_sequences=args.max_concurrent_sequences, **options)
+            finally:
+                close = getattr(transport, "close", None)
+                if callable(close):
+                    closed = close()
+                    if inspect.isawaitable(closed):
+                        await closed
+        result = asyncio.run(execute_and_close())
     else:
         result = evaluation_plan(config, **options)
+        result["max_concurrent_sequences"] = args.max_concurrent_sequences
+        result["native_workers"] = args.openclaw_workers if args.execution_backend == "native-openclaw" else None
         args.output.resolve().mkdir(parents=True, exist_ok=False)
         _write(args.output.resolve() / "plan.json", result)
     print(json.dumps({"mode": "execute" if args.execute else "plan", "output": str(args.output.resolve()),

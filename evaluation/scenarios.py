@@ -226,9 +226,11 @@ def pilot_sequences():
 
 
 def planned_manifest():
-    """Reserve family-disjoint authoring slots. Planned rows cannot be executed."""
+    """List authored pilot/development cases and reserve held-out authoring slots."""
+    from .development_scenarios import development_sequences
     rows = [s.manifest_entry() for s in pilot_sequences()]
-    for split, families, variants in (("development", 100, 1), ("heldout", 500, 1)):
+    rows.extend(s.manifest_entry() for s in development_sequences())
+    for split, families, variants in (("heldout", 500, 1),):
         for family_number in range(1, families + 1):
             family = f"{split}-family-{family_number:03d}"
             for variant in range(1, variants + 1):

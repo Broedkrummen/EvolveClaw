@@ -47,6 +47,16 @@ Finalize sample size from the minimum worthwhile improvement and measured paired
 outcome disagreements, allowing for clustering and evaluator error. Choose the
 API budget after measuring pilot usage.
 
+The executable development split now contains 100 authored synthetic sequences:
+20 different everyday task families with five variants per family, 300 scored
+tasks and 200 fresh probes. Variants share a family cluster; this is not 100
+independent families. Structural tests establish reachable tool-backed answers,
+scope changes, rollback cases, and separation from pilot fixtures. They do not
+establish task difficulty or model quality. The 500 held-out slots remain an
+independent authoring and review task. The [MiMo pilot protocol](mimo-pilot-protocol.md)
+records the selected model, native execution, token/credit accounting, and first
+live transport smoke.
+
 ## Why the required size varies
 
 Success/failure on identical tasks is a paired comparison. Its information depends

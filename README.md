@@ -67,10 +67,14 @@ parallel-perspective/candidate-selection architecture. See
 [paper fidelity and limits](docs/scope-paper-implementation.md), and
 [evaluation readiness](docs/evaluation-readiness.md).
 
-Offline tests verify mechanics. Actual quality comparisons require explicitly
-configured models, prices, and a spending cap. The authored pilot has 20 sequences;
-the planned 100/500 development and held-out cases still need authoring. No
-scripted result establishes an improvement in real-model task reliability.
+Offline tests verify mechanics. Actual quality comparisons require an explicit
+model and a dollar or token budget; subscription experiments also account for
+weighted plan credits. The authored pilot has 20 sequences, and the development
+split has 100 sequences in 20 families with five clustered variants per family.
+The 500 held-out slots still need separate authoring and review. The
+[MiMo pilot protocol](docs/mimo-pilot-protocol.md) records the first live native
+OpenClaw transport smoke; a smoke or scripted result does not establish improved
+task reliability.
 
 ## Requirements
 

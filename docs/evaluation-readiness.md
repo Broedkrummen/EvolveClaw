@@ -1,6 +1,6 @@
 # Actual-model evaluation readiness
 
-The runner is implemented, but no paid model experiment has been run. Mock responses establish integration mechanics only. The current 20-sequence pilot has 10 authored families; the planned 100 development and 500 held-out slots have no executable fixtures. Neither this pilot nor the deterministic surrogates in `evaluation.runner` establishes that v0.3 improves everyday task reliability.
+The runner is implemented and a native MiMo connectivity smoke has passed; a complete learning-condition experiment has not yet established task-quality improvement. Mock responses establish integration mechanics only. The pilot has 20 authored sequences in 10 families. Development now has 100 authored sequences in 20 families; its five variants per family are correlated examples. The 500 held-out slots still have no executable fixtures. Neither these small suites nor the deterministic surrogates in `evaluation.runner` establishes that v0.3 improves everyday task reliability.
 
 ## Implemented conditions
 
@@ -20,8 +20,8 @@ The application comparison is v0.3 versus the exact repaired v0.2 source, not th
 - The assistant receives only public instructions, scope labels, advertised tools/arguments, observed fake tool results, and learned guidance. It has no real network, account, shell, or filesystem tools. Answer keys are used only after execution; scorer results and validated success labels are never supplied to any learner or promotion gate.
 - Feedback is an ordinary authored user message, including deliberately wrong feedback. Application reflection receives bounded previous public user/assistant context as the sidecar does. Each fixture assistant execution starts a new model history; it does not yet reproduce native chat transcript context across turns. Strategic/tactical memory is the measured cross-run intervention.
 - An undo event invokes the actual v0.3 history-restore API for the change accepted from the most recent user-feedback turn, if one exists. This owner action has an explicit recorded target; it does not select a rule using a scored failure. v0.2, released SDK, and the paper controller have no invented rollback mechanism.
-- One reservation-based ledger covers assistant calls, reflection, classification, Best-of-N candidates/selection, consolidation, every condition, and both parallel perspectives. Unknown or failed usage retains its reservation. Budget exhaustion aborts with `incomplete.json` and no completed comparison. No automatic retries occur.
-- Configuration must explicitly name provider, model, endpoint, secret environment variable, input/output prices, dollar/call/token limits, split, conditions, and output. The secret value is never written in the plan or run artifacts. Costs at supplied rates are estimates rather than provider billing statements. The current text-only provider contract and token reservation limits are described in `evaluation/models.py`.
+- One reservation-based ledger covers assistant calls, reflection, classification, Best-of-N candidates/selection, consolidation, every condition, and both parallel perspectives. It can enforce raw prompt+completion tokens, weighted quota credits, and priced dollars independently. Unknown or failed usage retains its reservation. Budget exhaustion aborts with `incomplete.json` and no completed comparison. The adapters do not retry; lower-level native attempt counts remain unknown and are recorded.
+- Configuration explicitly names provider, model, endpoint, backend, caps, split, conditions, and output. Direct HTTP selects a secret environment-variable name; native OpenClaw resolves its existing managed login without reading a provider secret in Python. A dollar cap requires known input/output prices; token/credit-only runs leave USD unknown/null. Host catalog cost zero is not evidence of free usage. The current text-only provider and reservation contract is described in `evaluation/models.py`.
 
 ## Offline planning
 
@@ -37,7 +37,46 @@ python -m evaluation.run_models \
   --split pilot --output artifacts/evaluation/model-plan
 ```
 
-The endpoint/model/prices above are placeholders for a **plan**, not provider recommendations. Paid execution requires a reviewed concrete configuration, its named secret variable, a new output directory, and the explicit `--execute` flag. `development` and `heldout` currently fail with an authoring-required error; they never fall back to pilot data. Output directories are exclusive and are not overwritten.
+The endpoint/model/prices above are placeholders for a **plan**, not provider recommendations. Actual execution requires a concrete configuration, a new output directory, and explicit `--execute`. Both `pilot` and `development` select authored fixtures; `heldout` fails rather than falling back to other data. Repeat `--sequence-id` to select exact authored cases from distinct families; unknown/duplicate IDs are rejected. Output directories are exclusive and are not overwritten.
+
+For the selected Xiaomi Token Plan, an offline plan needs no guessed dollar prices:
+
+```sh
+python -m evaluation.run_models \
+  --provider xiaomi-mimo --model mimo-v2.6-flash \
+  --base-url https://token-plan-ams.xiaomimimo.com/v1 \
+  --execution-backend native-openclaw \
+  --max-total-tokens 2000000 --max-quota-credits 250000000 \
+  --quota-cached-input-credits 2 --quota-uncached-input-credits 100 \
+  --quota-output-credits 200 --max-calls 2000 \
+  --max-input-tokens 65536 --max-output-tokens 2048 \
+  --split pilot --sequence-limit 1 \
+  --output artifacts/evaluation/mimo-native-plan
+```
+
+The caps are distinct: raw tokens include prompt and completion once; subscription
+credits use model-specific weights. MiMo-V2.6-Flash uses cached input 2, uncached
+input 100, and output 200 credits per token. Estimates ignore the off-peak discount
+and assume uncached input when cache detail is missing. These are conservative
+local estimates, not an account balance or provider bill. [Official Token Plan
+documentation](https://mimo.mi.com/docs/tokenplan/subscription).
+
+Token Plan credentials must use the native OpenClaw backend; direct HTTP is
+rejected before credential lookup. Actual native execution additionally supplies
+`--openclaw-cli`, `--openclaw-config`, and `--openclaw-workspace` for a pinned
+isolated profile with real tools denied. See [native execution](native-openclaw-evaluation.md)
+for preparation and the host's additional context/retry limits. The native transport
+can validate one completed assistant turn; it cannot independently prove one
+provider attempt. Reports therefore expose model-execution requests and an unknown
+native provider-attempt count. Strict HTTP-equivalent reservation guarantees remain
+unsupported and can be required with `--require-strict-native-budget`, which fails
+before a call.
+
+For repeated native requests, add `--openclaw-warm-worker --node-path /absolute/path/to/node`.
+The worker reuses pinned OpenClaw imports while serializing model execution; fake
+worlds and paper perspective state remain independent. The CLI awaits worker
+cleanup after both successful and aborted evaluations. Native scheduling and host
+system instructions are recorded differences from the original paper harness.
 
 ## Verification and remaining evidence
 
@@ -45,9 +84,9 @@ Implemented offline checks in `tests/test_model_integration.py` exercise all fiv
 
 Before interpreting task quality:
 
-1. Select the model/provider/endpoint, known prices, explicit spending allowance, sufficient call/token limits, and sampling temperature (`--temperature`, recorded default 0.3). Provider calls have not been smoke-tested against any live service. Exact paper sampling/seed behavior is unavailable and has not been replicated.
+1. Select the model/provider/endpoint/backend, explicit token/credit or priced-dollar allowance, sufficient call/output limits, and sampling temperature (`--temperature`, recorded default 0.3). The initial native MiMo smoke verified connectivity, model/provider identity, and usage reporting; it did not compare learning conditions. Exact paper sampling/seed behavior is unavailable and has not been replicated.
 2. Run and inspect a small actual-model pilot. Report denominators, rejected/failed learning proposals, actual/unknown usage and estimated costs, category failures, both perspective results, and any incomplete runs. The base fixture prompt already emphasizes verifying tool results; ceiling effects are possible.
-3. Author and review genuinely family-disjoint development and held-out tasks, including harder everyday assistant cases and realistic conflicting or malicious observations. Lock held-out fixtures and scoring before tuning. Repeated variants or repetitions are not extra independent families.
+3. Review the 20 development families and author genuinely family-disjoint held-out tasks, including harder everyday cases and realistic conflicting or malicious observations. Lock held-out fixtures and scoring before tuning. Repeated variants or repetitions are not extra independent families.
 4. Run the predeclared v0.3 versus genuine v0.2 comparison with matched tasks and model settings. The cluster bootstrap is descriptive for the small pilot; family labels alone do not prove statistical independence. Do not transfer the SCOPE paper's headline gains to EvolveClaw.
 5. Verify actual OpenClaw integration separately: native audience/project admission, hooks, same-session overlaps, authorization, restart/reload, memory controls, and dashboard. This fixture runner measures optimizer behavior rather than deployed plugin reliability.
 

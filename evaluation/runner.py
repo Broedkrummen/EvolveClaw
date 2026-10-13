@@ -79,8 +79,8 @@ def run_pilot(output: Path):
     summary = summarize(results)
     summary.update({"authored_sequences": len(sequences), "family_clusters": len({s.cluster_id for s in sequences}),
                     "future_tasks_per_condition": sum(sum(isinstance(e, Task) and e.phase == "future" for e in s.events) for s in sequences),
-                    "planned_development_sequences": 100, "planned_heldout_sequences": 500,
-                    "planned_fixtures_warning": "Development and held-out rows reserve authoring slots; no runnable fixtures or evidence yet."})
+                    "authored_development_sequences": 100, "planned_heldout_sequences": 500,
+                    "planned_fixtures_warning": "Development fixtures are authored but are not executed by this scripted pilot; held-out rows still reserve authoring slots."})
     _write_json(output / "sequence_results.json", results)
     _write_json(output / "summary.json", summary)
     (output / "README.txt").write_text("MECHANICS ONLY: scripted surrogates, not real AI versions.\n"

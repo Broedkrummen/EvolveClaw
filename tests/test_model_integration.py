@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import importlib.util
 from unittest.mock import patch
 
 from evaluation.models import BudgetedModel, BudgetExceeded, ModelConfig
@@ -80,8 +81,8 @@ class ModelIntegrationTests(unittest.TestCase):
         self.assertEqual(plan["conditions"], list(CONDITIONS))
         self.assertFalse(plan["model_configuration"]["opt_in"])
 
-    def test_planned_splits_are_rejected_and_cli_defaults_to_plan(self):
-        for split in ("development", "heldout"):
+    def test_heldout_is_planned_and_priced_cli_defaults_to_plan(self):
+        for split in ("heldout",):
             with self.assertRaisesRegex(ValueError, "no executable fixtures"):
                 evaluation_plan(configuration(), split=split)
         with tempfile.TemporaryDirectory() as tmp, patch("sys.stdout", new_callable=io.StringIO):
@@ -92,6 +93,178 @@ class ModelIntegrationTests(unittest.TestCase):
                   "--split", "pilot", "--sequence-limit", "1", "--output", str(output)])
             self.assertEqual(json.loads((output / "plan.json").read_text())["api_calls"], 0)
             self.assertEqual(list(output.iterdir()), [output / "plan.json"])
+
+    @unittest.skipUnless(importlib.util.find_spec("evaluation.development_scenarios"), "Development authoring module pending")
+    def test_authored_development_split_has_family_clusters(self):
+        plan = evaluation_plan(configuration(), split="development", conditions=("learning-off",))
+        self.assertEqual(plan["sequence_runs"], 100)
+        self.assertEqual(plan["family_clusters"], 20)
+        self.assertTrue(all(sequence_id.startswith("development.") for sequence_id in plan["sequence_ids"]))
+
+    def test_exact_sequence_selection_rejects_unknown_and_duplicate_ids(self):
+        sequences = pilot_sequences()
+        first = sequences[0]
+        second = next(sequence for sequence in sequences if sequence.family_id != first.family_id)
+        plan = evaluation_plan(configuration(), conditions=("learning-off",), sequence_ids=[second.sequence_id, first.sequence_id])
+        self.assertEqual(plan["sequence_ids"], [second.sequence_id, first.sequence_id])
+        self.assertEqual(plan["family_clusters"], 2)
+        for ids in ([first.sequence_id, first.sequence_id], ["not-authored"]):
+            with self.assertRaises(ValueError):
+                evaluation_plan(configuration(), sequence_ids=ids)
+
+    def test_native_token_plan_cli_needs_no_fake_prices_or_secret_lookup(self):
+        first = pilot_sequences()[0].sequence_id
+        original_get = os.environ.get
+        def no_native_secret(name, default=None):
+            if name == "OPENCLAW_MANAGED_AUTH":
+                raise AssertionError("No secret in plan")
+            return original_get(name, default)
+        with tempfile.TemporaryDirectory() as tmp, patch("sys.stdout", new_callable=io.StringIO), \
+             patch("evaluation.models.os.environ.get", side_effect=no_native_secret):
+            output = Path(tmp) / "token-plan"
+            main(["--provider", "xiaomi-mimo", "--model", "mimo-v2.6-flash",
+                  "--base-url", "https://token-plan-ams.xiaomimimo.com/v1",
+                  "--execution-backend", "native-openclaw", "--max-total-tokens", "2000000",
+                  "--max-quota-credits", "250000000", "--quota-uncached-input-credits", "100",
+                  "--quota-cached-input-credits", "2", "--quota-output-credits", "200",
+                  "--split", "pilot", "--sequence-id", first, "--output", str(output)])
+            plan = json.loads((output / "plan.json").read_text())
+            self.assertEqual(plan["model_configuration"]["api_key_env"], "OPENCLAW_MANAGED_AUTH")
+            self.assertIsNone(plan["model_configuration"]["max_cost_usd"])
+            self.assertIsNone(plan["model_configuration"]["input_usd_per_million"])
+            self.assertEqual(plan["model_configuration"]["max_total_tokens"], 2_000_000)
+            self.assertEqual(plan["provider_settings"]["thinking"], "disabled")
+            self.assertEqual(plan["provider_settings"]["currency_pricing_status"], "unknown")
+
+    def test_token_only_actual_algorithm_mock_run_reports_unknown_currency(self):
+        config = configuration(provider="xiaomi-mimo", model="mimo-v2.6-flash", max_cost_usd=None,
+            input_usd_per_million=None, output_usd_per_million=None, max_total_tokens=2_000_000,
+            max_quota_credits=250_000_000, quota_uncached_input_credits=100,
+            quota_cached_input_credits=2, quota_output_credits=200)
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = asyncio.run(run_model_evaluation(config, Path(tmp) / "token-only",
+                conditions=("repaired-v0.2", "improved"), sequence_limit=1,
+                transport=FixtureTransport(), offline_mock=True))
+        self.assertEqual(summary["live_api_calls"], 0)
+        self.assertIsNone(summary["usage"]["accounted_budget_usd"])
+        self.assertEqual(summary["usage"]["cost_status"], "unknown")
+        self.assertGreater(summary["usage"]["known_total_tokens"], 0)
+        for condition in ("repaired-v0.2", "improved"):
+            self.assertIsNone(summary["conditions"][condition]["usage"]["accounted_budget_usd"])
+            self.assertGreater(summary["conditions"][condition]["usage"]["known_total_tokens"], 0)
+
+    def test_native_cli_warm_worker_is_closed_on_success_and_failure(self):
+        instances = []
+        class Native:
+            def __init__(self, *args, **kwargs):
+                self.options, self.closed = kwargs, False
+                instances.append(self)
+            async def close(self):
+                self.closed = True
+        for fail in (False, True):
+            async def execute(*args, **kwargs):
+                if fail:
+                    raise RuntimeError("Injected evaluation failure")
+                return {"efficacy_evidence": False, "evidence_kind": "injected-test"}
+            with tempfile.TemporaryDirectory() as tmp, patch("sys.stdout", new_callable=io.StringIO), \
+                 patch("evaluation.openclaw_transport.NativeOpenClawTransport", new=Native), \
+                 patch("evaluation.run_models.run_model_evaluation", new=execute):
+                arguments = ["--execute", "--provider", "xiaomi-mimo", "--model", "mimo-v2.6-flash",
+                    "--base-url", "https://token-plan-ams.xiaomimimo.com/v1", "--execution-backend", "native-openclaw",
+                    "--max-total-tokens", "2000000", "--max-quota-credits", "250000000",
+                    "--quota-uncached-input-credits", "100", "--quota-cached-input-credits", "2", "--quota-output-credits", "200",
+                    "--openclaw-cli", "/explicit/openclaw", "--openclaw-config", "/explicit/native.json",
+                    "--openclaw-workspace", "/explicit/workspace", "--openclaw-warm-worker", "--node-path", "/explicit/node",
+                    "--split", "pilot", "--sequence-limit", "1", "--output", str(Path(tmp) / "native")]
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError, "Injected evaluation failure"):
+                        main(arguments)
+                else:
+                    main(arguments)
+                self.assertTrue(instances[-1].closed)
+                self.assertTrue(instances[-1].options["warm_worker"])
+                self.assertEqual(instances[-1].options["node_path"], Path("/explicit/node"))
+
+    def test_parallel_sequence_jobs_preserve_memory_isolation_and_canonical_order(self):
+        class Delayed(FixtureTransport):
+            def __init__(self):
+                super().__init__()
+                self.active, self.maximum = 0, 0
+            async def __call__(self, *args):
+                self.active += 1
+                self.maximum = max(self.maximum, self.active)
+                try:
+                    await asyncio.sleep(.002)
+                    return await super().__call__(*args)
+                finally:
+                    self.active -= 1
+        first = pilot_sequences()[0]
+        second = next(sequence for sequence in pilot_sequences() if sequence.family_id != first.family_id)
+        ids = [second.sequence_id, first.sequence_id]
+        transport = Delayed()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "parallel"
+            summary = asyncio.run(run_model_evaluation(configuration(), output, conditions=("learning-off", "improved"),
+                sequence_ids=ids, transport=transport, offline_mock=True, max_concurrent_sequences=3))
+            rows = json.loads((output / "sequence_results.json").read_text())
+            self.assertEqual([(row["condition"], row["sequence_id"]) for row in rows],
+                             [(condition, sequence_id) for condition in ("learning-off", "improved") for sequence_id in ids])
+            stores = list((output / "run-001/improved").glob("*/memory/scoped-state/memory.sqlite3"))
+            self.assertEqual(len(stores), 2)
+            self.assertEqual(summary["max_concurrent_sequences"], 3)
+            self.assertGreater(transport.maximum, 1)
+            self.assertLessEqual(transport.maximum, 3)
+            self.assertEqual(transport.active, 0)
+
+    def test_parallel_budget_failure_cancels_and_joins_pending_jobs(self):
+        class Pending(FixtureTransport):
+            def __init__(self):
+                super().__init__()
+                self.dispatched, self.active, self.cancelled = 0, 0, False
+            async def __call__(self, *args):
+                self.dispatched += 1
+                number = self.dispatched
+                self.active += 1
+                try:
+                    if number == 2:
+                        await asyncio.Event().wait()
+                    await asyncio.sleep(.005)
+                    return await super().__call__(*args)
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                finally:
+                    self.active -= 1
+        transport = Pending()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "parallel-capped"
+            with self.assertRaises(BudgetExceeded):
+                asyncio.run(run_model_evaluation(configuration(max_calls=2), output, conditions=("learning-off",),
+                    sequence_limit=2, transport=transport, offline_mock=True, max_concurrent_sequences=2))
+            incomplete = json.loads((output / "incomplete.json").read_text())
+            self.assertEqual(incomplete["usage"]["request_count"], 2)
+            self.assertFalse((output / "summary.json").exists())
+            self.assertTrue(transport.cancelled)
+            self.assertEqual(transport.active, 0)
+            self.assertEqual(transport.dispatched, 2)
+
+    def test_native_evidence_excludes_model_text_headers_and_diagnostics(self):
+        from types import SimpleNamespace
+        from evaluation.run_models import native_transport_evidence
+        transport = SimpleNamespace(config_sha256="pinned-hash", budget_contract={"max_provider_attempts": None},
+            events=[{"status": "completed", "config_sha256": "pinned-hash", "model": "mimo-v2.6-flash",
+                     "final": "private-response", "headers": {"Authorization": "private-header"}, "stderr": "private-diagnostic",
+                     "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110,
+                               "prompt_tokens_details": {"cached_tokens": 80}, "private": "not-exported"},
+                     "worker": {"openclaw_version": "2026.10.2", "entry_source_sha256": "entry-hash",
+                                "internal_entry": True, "persistent_worker": True, "model_requests_serialized": True,
+                                "private": "not-exported"}}])
+        evidence = native_transport_evidence(transport)
+        text = json.dumps(evidence)
+        for private in ("private-response", "private-header", "private-diagnostic", "not-exported"):
+            self.assertNotIn(private, text)
+        self.assertEqual(evidence["worker"]["entry_source_sha256"], "entry-hash")
+        self.assertEqual(evidence["events"][0]["usage"]["total_tokens"], 110)
 
     def test_execution_requires_explicit_mode_before_creating_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

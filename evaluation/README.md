@@ -119,46 +119,70 @@ filesystem/tool sandbox. A Python object boundary alone provides no access contr
 
 The runnable comparison entry point is `python3 -m evaluation.run_models`.
 Omitting `--execute` writes a plan without reading a credential or making a call.
-Use `--help` for its required provider, model, endpoint, key-variable name, prices,
-and cap. The [evaluation readiness guide](../docs/evaluation-readiness.md) explains
+Use `--help` for provider, model, endpoint, backend, and explicit caps. Priced HTTP
+runs use a named key variable and unit prices; native subscription runs use host
+authentication and separate raw-token/credit limits. The [evaluation readiness guide](../docs/evaluation-readiness.md) explains
 the actual application/SDK/paper conditions and current limitations. This compares
 learning implementations in the fake-tool agent; it does not execute OpenClaw's
 native Gateway hook integration or reproduce the original paper's task set.
 
-`models.py` supplies runnable OpenAI-compatible text and Anthropic text adapters;
+`models.py` supplies OpenAI-compatible, Anthropic, and explicit Xiaomi MiMo adapters;
 `real_agent.py` supplies a bounded model loop over `FakeWorld`. Credentials are
 read only from the explicitly named environment variable when a non-mocked call
-is about to be issued. Models, endpoints, input/output prices, token limits,
-maximum call count, and a positive US-dollar cap must be explicitly configured.
+is about to be issued through direct HTTP. The native OpenClaw backend resolves its
+own managed authentication; Python does not read or forward a provider key.
+Models, endpoints, a total-token or priced-dollar cap, and call/output limits must
+be explicit. USD prices and the dollar cap can be omitted for a token-plan run;
+currency then remains unknown/null, including when a host catalog reports cost zero.
 Temperature is recorded and configurable in [0,1], defaulting to 0.3 as an
 evaluation setting. This is not a claim about the original paper's complete
 decoding setup; the released SDK adapters default their temperature to unspecified.
 With temperature zero, N=2 candidates generated
 by the same model and prompt may be identical; preserve that setting in the report.
 Planning can validate `ModelConfig` with `require_opt_in=False`; actual model
-construction requires `opt_in=True`. No live calls were made while implementing
-or testing these adapters. Actual execution uses `models.ModelConfig` and
+construction requires `opt_in=True`. Tests use injected responses. Actual execution uses `models.ModelConfig` and
 `models.BudgetedModel`.
 
 Use one shared `BudgetLedger` for all solver, reflection, classification,
 candidate, selector, and consolidation calls across conditions and perspectives.
-Each request reserves the configured maximum input/output cost before issuance.
-Known provider token usage reconciles that reservation; failed or unknown usage
-retains the full amount. API requests set an explicit `max_tokens`, enforce a
+Each request reserves the configured maximum raw input/output tokens, optional
+weighted credits, and optional priced cost before issuance. Known provider usage
+reconciles these independently; failed or unknown usage retains the reservation.
+Reasoning tokens are a subset of completion, and cached input is a subset of prompt:
+neither is added twice. Inconsistent usage prevents release and blocks later calls.
+Generic direct requests use `max_tokens`; Xiaomi uses `max_completion_tokens` and
+`thinking:{"type":"disabled"}` for the first comparable pilot. Requests enforce a
 conservative UTF-8 text bound for input, reject redirects, and never retry
 automatically. Models must support this output parameter, the configured temperature,
 text input, and standard prompt/completion billing. This is not a universal client
 for arbitrary reasoning, audio, multimodal, hosted-tool, or nonstandard billing
-APIs. The configured prices must cover every billable token; additional cache
-pricing is unsupported. Dollars are estimates at those configured prices, while
-provider token counts are labeled actual when supplied. Unknown pricing cannot
-start a capped run, and unknown usage is never reported as free.
+APIs. A dollar cap requires known prices covering all billable tokens; unsupported
+Anthropic cache pricing blocks further calls. A raw-token cap does not require
+invented USD rates. Dollars at supplied rates and quota credits at supplied weights
+are estimates; provider token counts are actual when supplied. Unknown usage is
+never reported as free.
+
+Xiaomi Token Plan uses **credits**, rather than raw tokens. For MiMo-V2.6-Flash the
+documented weights are 2 credits per cached input token, 100 per uncached input
+token, and 200 per output token. Credit estimates ignore the off-peak discount,
+and missing cache detail conservatively counts all prompt tokens as uncached.
+Configure these weights explicitly alongside separate total-token and credit caps.
+[Official subscription documentation](https://mimo.mi.com/docs/tokenplan/subscription).
+
+Direct HTTP to Token Plan endpoints is disabled. Use the approved native OpenClaw
+backend, pinned isolated configuration/workspace, managed host login, and denied
+real tools. Legitimate direct PAYG MiMo requests remain a separate explicit backend.
+The native model transport is described in [the native evaluation guide](../docs/native-openclaw-evaluation.md).
 
 The input reservation assumes a text tokenizer uses at most one token per UTF-8
 byte plus the recorded request/role overhead, with no undisclosed billable input.
 Provider token/limit violations are recorded and prevent further requests; a
 client cannot undo a charge from a provider that violates its declared contract.
-This operational spending guard is not a guarantee about a provider's final
+Native OpenClaw adds its own system context, and lower-level attempt counts are
+not independently bounded. Native artifacts record this budget contract and an
+unknown provider attempt count rather than calling each host execution one HTTP
+request. `--require-strict-native-budget` rejects unsupported strict guarantees
+before execution. This operational reservation guard is not a guarantee about a provider's final
 billing statement. No hidden credentials, pricing, or budget defaults are chosen.
 
 `FakeWorldModelAgent.bind(task)` provides the paper controller's executor callback.
@@ -185,7 +209,8 @@ Before running paid evaluation, review and configure all of the following:
    classification, and consolidation calls. Reserve a worst-case permitted call
    amount before issuing requests, stop before issuing an unreserved request, and
    reconcile usage afterward. A post-call estimate alone cannot enforce a limit.
-   Unknown usage/pricing must stay unknown and prevent starting a capped run.
+   Unknown usage retains its bounds; unknown prices prevent a dollar-capped run,
+   while explicitly bounded token/credit runs retain unknown currency.
 4. Supply normal corrections and observed failures to learning, never scorer
    keys or held-out expected answers. Store evaluation outcomes in a scorer
    database; send validated fixture results to production `/outcome` only in a
