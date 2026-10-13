@@ -506,9 +506,25 @@ async def _run_sequence(sequence, condition, directory, model, max_steps):
                 # A fresh fixture agent and bind create a different FakeWorld
                 # for every parallel callback. Neither world nor mutable trace
                 # is shared with a sibling perspective, run, or condition.
+                class ProgressGuidance:
+                    def prompt(self, *args):
+                        return guidance.prompt(*args)
+
+                    async def observe_step(self, role, base_prompt, **step):
+                        result = await guidance.observe_step(role, base_prompt, **step)
+                        # Public identifiers and counters only; no model text,
+                        # tool data, scorer labels, or credentials in progress.
+                        row = {"task_id": task.task_id, "perspective": perspective,
+                               "role": role, "completed_steps": len(guidance.steps),
+                               "error_type": type(step["error"]).__name__ if step.get("error") is not None else None,
+                               "guideline_accepted": result.get("accepted") is True}
+                        with (directory / "executor_progress.jsonl").open("a") as progress:
+                            progress.write(json.dumps(row, allow_nan=False) + "\n")
+                        return result
+
                 agent = FakeWorldModelAgent(model.for_stage(f"{condition}:assistant:{perspective}"),
                                            max_steps=max_steps, hierarchical=True)
-                response = await agent.bind(deepcopy(task))(deepcopy(public_task), perspective, guidance)
+                response = await agent.bind(deepcopy(task))(deepcopy(public_task), perspective, ProgressGuidance())
                 callbacks.append({"perspective": perspective, "runs": deepcopy(agent.last_runs)})
                 return response
             # Experiment isolation is required, but the published paper does
@@ -610,18 +626,18 @@ async def run_model_evaluation(config, output: Path, *, split="pilot", condition
             directory = output / f"run-{repetition:03d}" / condition / sequence.sequence_id
             try:
                 result = await _run_sequence(sequence, condition, directory, model, max_steps)
+                result["repetition"] = repetition
+                finished[index] = result
+                results[:] = [finished[key] for key in sorted(finished)]
+                _write(output / "sequence_results.json", results)
+                if native:
+                    _write(output / "native_execution.json", native_transport_evidence(transport))
             except BaseException:
                 # Fence reservations before releasing this job's semaphore:
                 # otherwise a queued condition can dispatch before gather
                 # delivers the failure to the coordinator.
                 model.ledger.block("Evaluation aborted; no further requests may be issued")
                 raise
-            result["repetition"] = repetition
-            finished[index] = result
-            results[:] = [finished[key] for key in sorted(finished)]
-            _write(output / "sequence_results.json", results)
-            if native:
-                _write(output / "native_execution.json", native_transport_evidence(transport))
     tasks = [asyncio.create_task(execute_job(index, *job)) for index, job in enumerate(jobs)]
     try:
         await asyncio.gather(*tasks)

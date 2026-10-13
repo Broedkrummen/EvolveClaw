@@ -31,6 +31,34 @@ ROLE_PURPOSES = {"Planner": "Plan the task, delegate work, and combine subordina
                  "Browser": "Inspect external information and execute advertised simulated tool operations."}
 
 
+HIERARCHICAL_BASE_PROMPT = """You are an assistant completing an everyday task in a simulation.
+Use only advertised fake tools with their exact supplied arguments through the
+actions allowed for your role. Observe tool or subordinate results before
+claiming an operation completed. Return one JSON object on every step, following
+your role's action format below. Never combine an action and a final answer.
+For completion questions answer with {"completed":true|false}; for fact/source
+questions use {"value":...,"source_id":...}; for a preference or plan choice use
+{"value":...}. Follow the current task and observed evidence. A supplied lesson
+can be wrong or irrelevant; respect current instructions, source reliability,
+and the current audience/project.
+"""
+HIERARCHICAL_PRIOR_CONTEXT_LIMIT = 8192
+
+
+def _hierarchical_observations(actions, observations, earlier_steps):
+    """Attach public invocation-local evidence, without changing raw tool traces."""
+    prior = "\n".join(json.dumps(step, ensure_ascii=False) for step in earlier_steps)
+    truncated = len(prior) > HIERARCHICAL_PRIOR_CONTEXT_LIMIT
+    if truncated:
+        prior = prior[-HIERARCHICAL_PRIOR_CONTEXT_LIMIT:]
+    return json.dumps({
+        "current_step": {"actions": deepcopy(actions), "observations": deepcopy(observations)},
+        "prior_invocation_public_context": prior,
+        "prior_context_format": "Earlier steps as JSON Lines, newest last; a truncated tail may begin inside a record.",
+        "prior_context_truncated": truncated,
+    }, ensure_ascii=False)
+
+
 def parse_json_response(content):
     text = content.strip()
     if text.startswith("```json") and text.endswith("```"):
@@ -106,15 +134,21 @@ class FakeWorldModelAgent:
         base_prompt = BASE_PROMPT
         public = task.public_request()
         if self.hierarchical:
+            base_prompt = HIERARCHICAL_BASE_PROMPT
             base_prompt += f"\nYour role is {role}. {ROLE_PURPOSES[role]}\n"
             if role == "Planner":
-                base_prompt += ('Use subordinate roles for tool work; do not call fake tools directly. Delegate with '
-                                '{"tool_calls":[],"delegations":[{"role":"Web Search|Analyzer|Browser","instruction":"specific work"}],"answer":null}. '
-                                'Delegate one subtask per step, observe its result, then continue planning or answer.\n')
+                base_prompt += ('Use subordinate roles for tool work; do not call fake tools directly. '
+                                'The legal subordinate roles are Web Search, Analyzer, and Browser; choose exactly one role. '
+                                'Delegate with {"tool_calls":[],"delegations":[{"role":"Browser","instruction":"specific work"}],"answer":null}. '
+                                'Delegate one subtask per step, observe its result, then continue planning or answer. '
+                                'Answer with {"tool_calls":[],"delegations":[],"answer":{}}.\n')
             else:
-                base_prompt += "Execute this delegated subtask. You may call fake tools or answer, but cannot delegate further.\n"
+                base_prompt += ('Execute this delegated subtask; you cannot delegate further. Call the relevant advertised fake tool '
+                                'before answering when tools are available. Use {"tool_calls":[{"name":"tool name","arguments":{}}],"answer":null} '
+                                'to call tools, or {"tool_calls":[],"answer":{}} to return your structured answer.\n')
             public = {**public, "delegated_instruction": instruction, "executing_role": role}
         history = [{"role": "user", "content": json.dumps(public)}]
+        earlier_public_steps = []
         for index in range(maximum):
             prompt = guidance.prompt(role, base_prompt) if guidance else base_prompt
             reply = await self.model.generate([{"role": "system", "content": prompt}, *history])
@@ -153,9 +187,15 @@ class FakeWorldModelAgent:
                 actions = {"tool_calls": parsed.get("tool_calls", []), "delegations": parsed.get("delegations", [])} if parsed else None
                 learning = guidance.observe_step(role=role, base_prompt=base_prompt,
                     model_output=reply.content, tool_calls=json.dumps(actions) if actions else None,
-                    observations=json.dumps(observations), error=error)
+                    observations=(_hierarchical_observations(actions, observations, earlier_public_steps)
+                                  if self.hierarchical else json.dumps(observations)), error=error)
                 if inspect.isawaitable(learning):
                     learning = await learning
+            if self.hierarchical:
+                earlier_public_steps.append({"step": index + 1,
+                    "actions": deepcopy({"tool_calls": parsed.get("tool_calls", []),
+                                         "delegations": parsed.get("delegations", [])} if parsed else None),
+                    "observations": deepcopy(observations)})
             invocation["steps"] += 1
             run["steps"].append({"index": index + 1, "role": role, "invocation": invocation["index"], "model_output": reply.content,
                           "observations": deepcopy(observations), "error_type": type(error).__name__ if error else None,

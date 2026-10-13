@@ -294,6 +294,87 @@ class ModelIntegrationTests(unittest.TestCase):
             self.assertEqual(aborted["usage"]["request_count"], 0)
             self.assertEqual(transport.requests, [])
 
+    def _assert_persistence_failure_fences_queued_dispatch(self, failure_point):
+        from evaluation import run_models as runner
+
+        class OfflineTransport:
+            native_openclaw = failure_point != "sequence_results.json"
+            events = []
+            config_sha256 = "offline-persistence-test"
+            budget_contract = {}
+
+            def __init__(self):
+                self.requests = []
+
+            async def __call__(self, url, payload, headers, timeout):
+                self.requests.append(deepcopy(payload))
+                return {"choices": [{"message": {"content": "{}"}}],
+                        "usage": {"prompt_tokens": 8, "completion_tokens": 2}}
+
+        transport = OfflineTransport()
+        injected = 0
+        returned = []
+        original_write = runner._write
+        original_evidence = runner.native_transport_evidence
+        message = f"Injected one-shot failure: {failure_point}"
+
+        async def sequence(sequence, condition, directory, model, max_steps):
+            if condition == "learning-off":
+                # Let the second job wait on the occupied semaphore first.
+                await asyncio.sleep(0)
+                returned.append(condition)
+                return {"condition": condition, "sequence_id": sequence.sequence_id}
+            await model.generate([{"role": "user", "content": "Queued offline dispatch probe."}])
+            # A regressed coordinator must cancel and join this dispatched job.
+            await asyncio.Event().wait()
+
+        def write_once(path, value):
+            nonlocal injected
+            if path.name == failure_point and injected == 0:
+                injected += 1
+                raise OSError(message)
+            return original_write(path, value)
+
+        def evidence_once(value):
+            nonlocal injected
+            if failure_point == "native-evidence" and injected == 0:
+                injected += 1
+                raise OSError(message)
+            return original_evidence(value)
+
+        config = configuration(execution_backend=(
+            "native-openclaw" if transport.native_openclaw else "direct-http"))
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(runner, "_run_sequence", side_effect=sequence), \
+             patch.object(runner, "_write", side_effect=write_once), \
+             patch.object(runner, "native_transport_evidence", side_effect=evidence_once):
+            output = Path(tmp) / "persistence-failure"
+            with self.assertRaisesRegex(OSError, message):
+                asyncio.run(run_model_evaluation(config, output,
+                    conditions=("learning-off", "improved"), sequence_limit=1,
+                    transport=transport, offline_mock=True, max_concurrent_sequences=1))
+            self.assertEqual(injected, 1)
+            self.assertEqual(returned, ["learning-off"])
+            aborted = json.loads((output / "incomplete.json").read_text())
+            self.assertEqual(aborted["status"], "aborted")
+            self.assertEqual(aborted["error_type"], "OSError")
+            self.assertEqual(aborted["completed_sequence_runs"], 1)
+            self.assertFalse(aborted["efficacy_evidence"])
+            self.assertFalse((output / "summary.json").exists())
+            if transport.native_openclaw:
+                self.assertEqual(json.loads((output / "native_execution.json").read_text())["events"], [])
+            self.assertEqual(aborted["usage"]["request_count"], 0)
+            self.assertEqual(transport.requests, [])
+
+    def test_sequence_results_write_failure_fences_queued_dispatch(self):
+        self._assert_persistence_failure_fences_queued_dispatch("sequence_results.json")
+
+    def test_native_execution_write_failure_fences_queued_dispatch(self):
+        self._assert_persistence_failure_fences_queued_dispatch("native_execution.json")
+
+    def test_native_evidence_failure_fences_queued_dispatch(self):
+        self._assert_persistence_failure_fences_queued_dispatch("native-evidence")
+
     def test_execution_requires_explicit_mode_before_creating_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "no-opt-in"
