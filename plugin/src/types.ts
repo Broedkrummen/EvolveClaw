@@ -8,6 +8,8 @@ export type EvolveClawConfig = {
   enabled: boolean;
   injectMode: InjectMode;
   maxGuidelines: number;
+  maxPromptChars?: number;
+  sidecarToken?: string;
   scopeModel?: string;
   scopeProvider?: string;
   scopeApiKey?: string;
@@ -25,6 +27,15 @@ export type GuidelineEntry = {
   guidelineId?: string;
 };
 
+export type MemoryScope = { audience_key: string; project_key: string };
+export type RuleRecord = { id: string; text: string; type: string; domain: string; status: string;
+  confidence: number; revision: number; evidence_ids: string[]; created_at: string; updated_at: string;
+  audience_key: string; project_key: string; task_id?: string };
+export type HistoryRecord = { id: string; revision: number; operation: string; rule_ids: string[];
+  created_at: string; summary: string; reversible?: boolean };
+export type MemorySnapshot = { revision: number; paused: boolean; rules?: RuleRecord[];
+  history?: HistoryRecord[]; usage?: Record<string, unknown>; detail?: unknown; evidence?: unknown; outcomes?: unknown };
+
 // ── SCOPE sidecar API types ──
 
 export type StepCompleteRequest = {
@@ -38,6 +49,7 @@ export type StepCompleteRequest = {
   current_system_prompt: string;
   task_id?: string;
   conversation_history?: string;
+  scope?: MemoryScope;
 };
 
 export type StepCompleteResponse = {
@@ -46,6 +58,7 @@ export type StepCompleteResponse = {
   guideline_id?: string;
   skipped: boolean;
   reason?: string;
+  revision?: number;
 };
 
 export type RulesResponse = {
@@ -53,6 +66,8 @@ export type RulesResponse = {
   rule_count: number;
   guidelines?: string[];
   configured?: boolean;
+  revision?: number;
+  paused?: boolean;
 };
 
 export type HealthResponse = {

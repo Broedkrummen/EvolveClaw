@@ -1,10 +1,17 @@
 {
   "id": "evolveclaw",
   "name": "EvolveClaw",
-  "version": "0.2.0",
-  "categories": ["developer-tools"],
-  "activation": { "onStartup": true, "onCapabilities": ["hook"] },
-  "description": "Self-improving agent prompt evolution — synthesizes, manages, and refines guidelines from execution traces via SCOPE.",
+  "version": "0.3.0",
+  "categories": [
+    "developer-tools"
+  ],
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": [
+      "hook"
+    ]
+  },
+  "description": "Self-improving agent prompt evolution \u2014 synthesizes, manages, and refines guidelines from execution traces via SCOPE.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -23,7 +30,10 @@
       },
       "injectMode": {
         "type": "string",
-        "enum": ["append_system", "prepend_context"],
+        "enum": [
+          "append_system",
+          "prepend_context"
+        ],
         "default": "append_system"
       },
       "maxGuidelines": {
@@ -37,7 +47,11 @@
       },
       "scopeProvider": {
         "type": "string",
-        "enum": ["anthropic", "openai", "litellm"]
+        "enum": [
+          "anthropic",
+          "openai",
+          "litellm"
+        ]
       },
       "scopeApiKey": {
         "type": "string"
@@ -53,6 +67,15 @@
         "type": "string"
       },
       "dataPath": {
+        "type": "string"
+      },
+      "maxPromptChars": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 100000,
+        "default": 12000
+      },
+      "sidecarToken": {
         "type": "string"
       }
     }
@@ -106,6 +129,26 @@
     "dataPath": {
       "label": "SCOPE Data Directory",
       "help": "Optional absolute path to existing SCOPE data. Defaults to stable OpenClaw state storage; existing server/scope_data is reused when present."
+    },
+    "maxPromptChars": {
+      "label": "Learned guidance character limit",
+      "help": "Bounds the added prompt context separately from the rule count."
+    },
+    "sidecarToken": {
+      "label": "Sidecar access token",
+      "sensitive": true,
+      "help": "Optional token for the sidecar. Match EVOLVECLAW_SIDECAR_TOKEN for a separately managed server."
     }
+  },
+  "uiCapabilities": [
+    "page",
+    "navigation",
+    "panel"
+  ],
+  "controlUi": {
+    "entry": "dist/control-ui/index.js",
+    "styles": [
+      "dist/control-ui/index.css"
+    ]
   }
 }

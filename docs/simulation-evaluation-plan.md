@@ -1,14 +1,30 @@
 # Simulation evaluation: proposed size and comparison design
 
-Status: saved for a later phase at the user's request, 13 October 2026.
+Status: offline scaffold started in parallel with the plugin improvements at the
+user's request, 13 October 2026. Larger efficacy comparisons remain a later phase.
 This refines the evaluation approach in the
-[working improvement plan](next-version-plan.md). No simulator or paid evaluation
-has been run. The [literature brief](memory-systems-literature-review.md) motivates
+[working improvement plan](next-version-plan.md). No paid evaluation has been run.
+The [literature brief](memory-systems-literature-review.md) motivates
 the mechanisms to compare.
 
-The simulator and larger version comparisons are deferred. Focus first on the
-agreed plugin improvements and their required mechanical/integration checks.
-Resume this proposal when planning the later evaluation phase.
+The [simulation scaffold](../evaluation/README.md) provides isolated fake-world
+fixtures, independently held scoring keys, paired reports, and an offline pilot.
+Its scripted assistant/memory adapters establish mechanics only, not actual AI
+efficacy. An additional smoke check uses the actual production MemoryStore for
+scope, evidence, history undo, revision fencing, and outcome provenance, without
+model calls. No paid or real-model version comparison has been run.
+
+The pilot contains 20 authored sequences in 10 template-family clusters, with
+40 future task probes per condition and 60 sequence runs across three conditions.
+Template variants are grouped; family identifiers do not establish statistical
+independence. Development/held-out manifests reserve 100/500 authoring slots;
+these are clearly marked planned, are not runnable cases, and count as no evidence.
+The [configured model runner](../evaluation/README.md#real-model-execution-explicit-opt-in-fake-tools-only)
+now wires a bounded fake-tool assistant to actual historical, current, released-SDK,
+and paper-method learning conditions. It has been tested only with injected model
+responses. Native OpenClaw hook integration, independent authoring of the larger
+fixtures, and the selected real-model spending configuration remain separate
+requirements. No benchmark superiority or real-model task quality has been measured.
 
 ## Pilot versus evidence
 

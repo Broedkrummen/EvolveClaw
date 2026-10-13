@@ -1,0 +1,11 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["plugin/src/control-ui.ts", "plugin/src/memory-ui.css"],
+  "locale": "en",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Select/Listbox", "Scrollbar", "Toast", "CRUD"],
+  "ownership": {"Select/Listbox": "authored"},
+  "requiredCommands": ["typecheck", "build", "e2e"],
+  "commands": {"typecheck": "npm run typecheck", "build": "npm run build", "e2e": "npm run test:ui"},
+  "evidence": {"crudFullFlow": "tests/ui/memory.spec.mjs", "failurePaths": "tests/ui/memory.spec.mjs"}
+}

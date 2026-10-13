@@ -1,7 +1,8 @@
 # EvolveClaw next version — working design
 
-Status: design interview in progress. This records accepted product choices and
-proposed implementation slices. It is not a confirmed implementation plan yet.
+Status: implementation authorized on 13 October 2026; delivery verification in progress.
+The user requested completion of the improved version and parallel evaluation work.
+Routine engineering decisions follow the accepted scope below.
 Baseline: repaired version 0.2.0, merged through PR #1. Development branch:
 `feature/evolveclaw-next`.
 
@@ -73,9 +74,9 @@ The [simulation evaluation proposal](simulation-evaluation-plan.md) separates a
 20-scenario simulator pilot from an initially 500-sequence held-out comparison.
 Final sizing depends on the improvement being measured, paired outcomes, and
 correlation between tasks. These are proposed research targets, not approved
-evaluation spending or confirmed implementation requirements. At the user's
-request, the simulator and larger comparison are saved for a later phase;
-the current release still requires its mechanical and integration checks.
+evaluation spending or confirmed implementation requirements. The user subsequently authorized building the simulator and SDK/paper reference
+runners in parallel. Model-based evaluation spending is still explicitly configured.
+The current release requires its mechanical and integration checks.
 
 ### 4. Shared controls in chat and the dashboard
 
@@ -97,16 +98,13 @@ served by the same Gateway over HTTPS or trusted loopback. Chat controls should
 continue to work when native UI is unavailable. Do not toggle live settings during
 repository development.
 
-## Open migration decision
+## Legacy migration policy
 
-Older records contain agent scope but no trustworthy user/project scope. The user
-has not yet selected one of these migration behaviors:
-
-1. Preserve them as inactive legacy history until an applicable scope is established.
-2. Preserve their existing active, agent-wide injection behavior.
-
-Neither option discards the old records. The chosen policy must be explicit,
-visible in both interfaces, reversible, and tested.
+On the instruction to finish implementation, use the previously recommended
+policy: preserve older unscoped rules as inactive history until an owner assigns
+them to a recorded scope. This keeps the agreed user/project boundaries effective.
+Original JSON is retained. Assignment and subsequent rule changes are visible,
+revision-checked, and reversible through both interfaces.
 
 ## Proof required before delivery
 
@@ -137,3 +135,11 @@ these only after the first pipeline has trustworthy measurements and budget poli
 - [OpenClaw feature plugin UI](https://docs.openclaw.ai/plugins/feature-plugins)
 - [Hook reference](https://docs.openclaw.ai/plugins/hooks/reference)
 - [Custom provider pricing defaults](https://docs.openclaw.ai/concepts/model-providers/custom-providers)
+
+## Reference experiments added to the authorized work
+
+Keep the unmodified released SDK as a distinct reproducible baseline. Add the
+paper architecture separately, including K=2 full perspective executions, N=2
+guideline candidates/selector, and hierarchical role budgets. These are isolated
+evaluation runners; they do not change the production plugin's future-task-only
+learning policy. See scope-paper-implementation.md and evaluation-readiness.md.

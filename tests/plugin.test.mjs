@@ -4,15 +4,17 @@ import http from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import plugin, { register, capGuidelines } from '../dist/index.js';
+import plugin, { register, capGuidelines, ScopeRegistry, scopeFromContext } from '../dist/index.js';
 
-const context = (sessionId = 'A', runId = `run-${sessionId}`) => ({ agentId: 'main', sessionId, sessionKey: `agent:main:${sessionId}`, runId, trigger: 'user' });
+const context = (sessionId = 'A', runId = `run-${sessionId}`) => ({ agentId: 'main', sessionId, sessionKey: `agent:main:${sessionId}`, runId, trigger: 'user', memoryAudience: { kind: 'owner-private', agentId: 'main' }, activeProjectKeys: ['project-test'], assertMemoryAudienceCurrent() {} });
 const endEvent = (text = 'answer') => ({ success: true, messages: [{ role: 'user', content: 'request' }, { role: 'assistant', content: text }] });
 
 async function harness(t, config = {}, options = {}) {
   const calls = [];
   const rules = new Map();
   const hooks = new Map();
+  const actions = new Map();
+  const commands = new Map();
   const services = [];
   const log = [];
   let configured = options.configured ?? true;
@@ -26,10 +28,10 @@ async function harness(t, config = {}, options = {}) {
       if (override !== undefined) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(override)); return; }
     }
     let output;
-    if (req.url === '/health') output = { status: 'ok', version: 'test', configured, protocol_version: 2 };
+    if (req.url === '/health') output = { status: 'ok', version: 'test', configured, protocol_version: 3 };
     else if (req.url === '/configure') { configured = true; output = { status: 'ok' }; }
     else if (req.url.startsWith('/rules/')) {
-      const guidelines = rules.get(decodeURIComponent(req.url.slice(7))) ?? [];
+      const guidelines = rules.get(decodeURIComponent(new URL(req.url, 'http://localhost').pathname.slice(7))) ?? [];
       output = { rules: guidelines.join('\n'), guidelines, rule_count: guidelines.length, configured };
     } else if (req.url === '/step') output = { guideline: `temporary ${body.task_id}`, guideline_type: 'tactical', skipped: false };
     else output = { status: 'ok' };
@@ -38,7 +40,7 @@ async function harness(t, config = {}, options = {}) {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => { server.closeAllConnections(); return new Promise((r) => server.close(r)); });
   const api = {
-    rootDir: resolve(import.meta.dirname, '..'), registrationMode: 'full',
+    id: 'evolveclaw', registerCommand(c) { commands.set(c.name, c); }, registerSessionAction(a) { actions.set(a.id, a); }, rootDir: resolve(import.meta.dirname, '..'), registrationMode: 'full',
     config: options.hostConfig ?? {},
     pluginConfig: { serverUrl: `http://127.0.0.1:${server.address().port}`, autoStartServer: false, ...config },
     runtime: { modelAuth: { resolveApiKeyForProvider: options.auth ?? (async () => ({ apiKey: 'mock-key', mode: 'api-key' })) } },
@@ -50,10 +52,12 @@ async function harness(t, config = {}, options = {}) {
   let started = false;
   const drain = async () => { await new Promise((r) => setTimeout(r, 30)); };
   const begin = async (ctx = context(), prompt = 'current request') => {
-    if (!started) { started = true; await services[0].start({ stateDir: tmpdir() }); }
+    if (!started) { started = true; const stateDir = await mkdtemp(resolve(tmpdir(), 'evolveclaw-test-')); t.after(async () => { await services[0].stop(); await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); }); await services[0].start({ stateDir }); }
+    const result = call('before_prompt_build', { prompt: 'projected request', currentUserMessage: prompt, messages: [] }, ctx);
+    await drain();
     return call('before_prompt_build', { prompt: 'projected request', currentUserMessage: prompt, messages: [] }, ctx);
   };
-  return { api, calls, rules, hooks, services, log, call, begin, drain };
+  return { api, calls, rules, hooks, actions, commands, services, log, call, begin, drain };
 }
 
 test('entry metadata is inert and disabled registration has no side effects', async (t) => {
@@ -62,6 +66,32 @@ test('entry metadata is inert and disabled registration has no side effects', as
   assert.equal(h.calls.length, 0); assert.equal(h.services.length, 1); assert.equal(h.hooks.size, 7);
   const disabled = await harness(t, { enabled: false });
   assert.equal(disabled.hooks.size, 0); assert.equal(disabled.services.length, 0);
+});
+
+test('recorded scopes preserve all session associations across revisits and restarts', async (t) => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'evolveclaw-registry-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const registry = new ScopeRegistry(); await registry.start(directory);
+  const a = context('A'), b = context('B');
+  const projectOne = registry.capture(a, 'agent', scopeFromContext(a));
+  registry.capture(b, 'agent', scopeFromContext(b));
+  assert.equal(registry.forSession('main', a.sessionKey, a.sessionId).id, projectOne.id);
+  const other = { ...a, activeProjectKeys: ['project-two'] };
+  registry.capture(other, 'agent', scopeFromContext(other));
+  registry.capture(a, 'agent', scopeFromContext(a));
+  assert.equal(registry.forSession('main', a.sessionKey, a.sessionId).id, projectOne.id);
+  await registry.flush();
+  const restored = new ScopeRegistry(); await restored.start(directory);
+  assert.equal(restored.forSession('main', b.sessionKey, b.sessionId).id, projectOne.id);
+  assert.equal(restored.forSession('main', a.sessionKey, a.sessionId).id, projectOne.id);
+  assert.equal(restored.forSession('other', a.sessionKey, a.sessionId), undefined);
+});
+
+test('long trusted identifiers are bounded without merging different audiences', () => {
+  const a = { ...context(), memoryAudience: { kind: 'conversation', agentId: 'main', sessionKey: 's'.repeat(1000), sessionId: 'A' }, activeProjectKeys: ['p'.repeat(1000)] };
+  const first = scopeFromContext(a), second = scopeFromContext({ ...a, memoryAudience: { ...a.memoryAudience, sessionId: 'B' } });
+  assert(first.audience_key.length <= 256 && first.project_key.length <= 256);
+  assert.notEqual(first.audience_key, second.audience_key);
 });
 
 test('current OpenClaw payloads retain true model input, assistant text, tools and errors', async (t) => {
@@ -128,7 +158,7 @@ test('session end prevents a delayed response from reintroducing temporary guida
   await h.call('session_end', { sessionId: 'A', sessionKey: 'agent:main:A' });
   release(); await ending;
   assert.deepEqual(await h.begin(context('A', 'new-run')), {});
-  assert.deepEqual(h.calls.find((c) => c.path === '/reset').body, { agent_name: 'openclaw-agent', task_id: 'A' });
+  assert.deepEqual(h.calls.find((c) => c.path === '/reset').body, { agent_name: 'openclaw-agent', task_id: 'A', scope: { audience_key: JSON.stringify(['owner-private','main']), project_key: JSON.stringify(['project-test']) } });
 });
 
 for (const [mode, field] of [['append_system', 'appendSystemContext'], ['prepend_context', 'prependContext']]) {
@@ -140,9 +170,9 @@ for (const [mode, field] of [['append_system', 'appendSystemContext'], ['prepend
     await h.begin(context('B')); await h.drain();
     const next = (await h.begin(context('B')))[field];
     assert.match(next, /merged guidance/); assert.doesNotMatch(next, /old guidance/);
-    assert.deepEqual(await h.begin({ ...context('C'), agentId: 'other' }), {});
+    assert.deepEqual(await h.begin({ ...context('C'), agentId: 'other', memoryAudience: { kind: 'owner-private', agentId: 'other' } }), {});
     await h.drain();
-    assert(h.calls.some((c) => c.path === '/rules/openclaw-agent%3Aother'));
+    assert(h.calls.some((c) => c.path.startsWith('/rules/openclaw-agent%3Aother?')));
   });
 }
 
@@ -158,11 +188,81 @@ test('a failure before any assistant message is still learned from', async (t) =
   assert.equal(h.calls.find((c) => c.path === '/step').body.error, 'failure before response');
 });
 
+test('unknown audience cannot read or learn guidance and project contexts remain isolated', async (t) => {
+  const h = await harness(t, {}, { respond: (path) => {
+    if (!path.startsWith('/rules/')) return;
+    const project = new URL(path, 'http://localhost').searchParams.get('project_key');
+    return { configured: true, guidelines: project === '["project-test"]' ? ['A project advice'] : [], rules: '' };
+  } });
+  const unknown = { ...context('unknown'), memoryAudience: undefined };
+  assert.deepEqual(await h.begin(unknown), {});
+  await h.call('agent_end', endEvent(), unknown);
+  assert(!h.calls.some(c => c.path === '/step'));
+  assert.match((await h.begin()).appendSystemContext, /A project advice/);
+  const different = { ...context('B'), activeProjectKeys: ['different-project'] };
+  assert.deepEqual(await h.begin(different), {});
+  await h.call('agent_end', endEvent(), different);
+  assert.equal(h.calls.find(c => c.path === '/step').body.scope.project_key, '["different-project"]');
+});
+
+test('a trace that changes scope mid-run is not learned into either project', async (t) => {
+  const h = await harness(t); await h.begin();
+  h.call('before_tool_call', { toolName: 'first-project', params: {} });
+  await h.begin({ ...context(), activeProjectKeys: ['second-project'] });
+  await h.call('agent_end', endEvent());
+  assert(!h.calls.some(c => c.path === '/step'));
+});
+
+test('long traces respect the sidecar schema without losing the final answer', async (t) => {
+  const h = await harness(t); await h.begin();
+  h.call('llm_input', { runId: 'run-A', sessionId: 'A', systemPrompt: 's'.repeat(100000) });
+  h.call('llm_output', { runId: 'run-A', sessionId: 'A', assistantTexts: ['x'.repeat(60000) + 'END'] });
+  for (let i = 0; i < 100; i++) {
+    h.call('before_tool_call', { toolName: 'tool', params: { body: 't'.repeat(1000) } });
+    h.call('after_tool_call', { toolName: 'tool', result: 'o'.repeat(2000) });
+  }
+  await h.call('agent_end', endEvent());
+  const body = h.calls.find(c => c.path === '/step').body;
+  assert(body.current_system_prompt.length <= 64000 && body.tool_calls.length <= 24000 && body.observations.length <= 24000);
+  assert(body.model_output.length <= 48000 && body.model_output.endsWith('END'));
+});
+
+test('management enforces fresh authority and invalidates promoted advice across all projects', async (t) => {
+  let disabled = false, stalled = false;
+  const pending = [];
+  const h = await harness(t, {}, { respond: (path) => {
+    if (path === '/memory/mutate') { disabled = true; stalled = true; return { revision: 2, paused: false, rules: [] }; }
+    if (path.startsWith('/rules/')) {
+      if (stalled) return new Promise(resolve => pending.push(resolve));
+      return { configured: true, guidelines: disabled ? [] : ['Promoted advice'] };
+    }
+  } });
+  assert.match((await h.begin()).appendSystemContext, /Promoted advice/);
+  const b = { ...context('B'), activeProjectKeys: ['second-project'] };
+  assert.match((await h.begin(b)).appendSystemContext, /Promoted advice/);
+  const actionContext = { pluginId: 'evolveclaw', agentId: 'main', sessionKey: 'agent:main:A', client: { scopes: ['operator.read','operator.write'] } };
+  await assert.rejects(h.actions.get('mutate').handler({ ...actionContext, client: { scopes: ['operator.read'] }, payload: { operation: 'disable', ruleId: 'rule', expectedRevision: 1 } }), /permission/);
+  await h.actions.get('mutate').handler({ ...actionContext, payload: { operation: 'disable', ruleId: 'rule', expectedRevision: 1 } });
+  assert.deepEqual(h.call('before_prompt_build', { prompt: 'request', messages: [] }, b), {});
+  await h.drain(); pending.forEach(resolve => resolve({ configured: true, guidelines: [] }));
+});
+
+test('chat commands and dashboard share mutation handlers and recheck owner authority', async (t) => {
+  const h = await harness(t, {}, { respond: (path) => path.startsWith('/memory/') ? { revision: 0, paused: false, rules: [] } : undefined });
+  await h.begin();
+  let guards = 0;
+  const command = { agentId: 'main', sessionId: 'A', sessionKey: 'agent:main:A', senderIsOwner: true, isAuthorizedSender: true,
+    assertOwnerCurrent() { if (++guards > 2) throw new Error('Owner authority expired'); }, args: 'pause' };
+  const result = await h.commands.get('evolveclaw-change').handler(command);
+  assert.match(result.text, /expired/);
+  assert(!h.calls.some(c => c.path === '/memory/mutate'));
+});
+
 test('an old detached sidecar is identified and cannot silently keep the old learning defects', async (t) => {
   const h = await harness(t, {}, { respond: (path) => path === '/health' ? { status: 'ok', version: '0.3.0', configured: true } : undefined });
   await h.begin(); await h.call('agent_end', endEvent()); await h.drain();
   assert(!h.calls.some((c) => c.path === '/step' || c.path === '/configure'));
-  assert(h.log.some((s) => s.includes('protocol 2 required')));
+  assert(h.log.some((s) => s.includes('protocol 3 required')));
 });
 
 test('prompt injection remains immediate while background memory retrieval is stalled', async (t) => {

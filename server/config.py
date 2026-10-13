@@ -7,6 +7,11 @@ load_dotenv(Path(__file__).with_name(".env"))
 
 
 class ServerConfig:
+    # Set for manually hosted sidecars; managed Gateway calls stay on loopback.
+    AUTH_TOKEN: str | None = os.getenv("EVOLVECLAW_SIDECAR_TOKEN") or os.getenv("EVOLVECLAW_TOKEN")
+    ESTIMATE_USAGE: bool = os.getenv("EVOLVECLAW_ESTIMATE_USAGE", "false").lower() == "true"
+    INPUT_COST_PER_MILLION: float | None = float(os.environ["EVOLVECLAW_INPUT_COST_PER_MILLION"]) if "EVOLVECLAW_INPUT_COST_PER_MILLION" in os.environ else None
+    OUTPUT_COST_PER_MILLION: float | None = float(os.environ["EVOLVECLAW_OUTPUT_COST_PER_MILLION"]) if "EVOLVECLAW_OUTPUT_COST_PER_MILLION" in os.environ else None
     HOST: str = os.getenv("EVOLVECLAW_HOST", "127.0.0.1")
     PORT: int = int(os.getenv("EVOLVECLAW_PORT", "5757"))
 

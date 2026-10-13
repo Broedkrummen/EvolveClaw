@@ -1,12 +1,15 @@
 import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { ScopeClient } from "./scope-client.js";
 import { Sidecar } from "./sidecar.js";
-import type { EvolveClawConfig, GuidelineEntry } from "./types.js";
+import type { EvolveClawConfig, GuidelineEntry, MemoryScope } from "./types.js";
+import { ScopeRegistry, scopeFromContext, type TrustedContext } from "./scope-registry.js";
+import { registerMemoryControls } from "./memory-controls.js";
+export { ScopeRegistry, scopeFromContext } from "./scope-registry.js";
 
-type Identity = { runId?: string; agentId?: string; sessionId?: string; sessionKey?: string; trigger?: string };
+type Identity = TrustedContext & { runId?: string; trigger?: string };
 type Message = { role?: string; content?: unknown };
-type Session = { agentName: string; taskId: string; tactical: GuidelineEntry[]; ended: boolean };
-type Trace = { session: Session; prompt: string; systemPrompt: string; modelOutput: string; tools: string[]; observations: string[]; error?: string };
+type Session = { agentName: string; taskId: string; identityKey: string; scope: MemoryScope; tactical: GuidelineEntry[]; ended: boolean };
+type Trace = { session: Session; prompt: string; systemPrompt: string; modelOutput: string; tools: string[]; observations: string[]; error?: string; scopeChanged?: boolean };
 const SIDE_TRIGGERS = new Set(["heartbeat", "memory", "cron"]);
 
 export function extractText(value: unknown): string {
@@ -59,12 +62,13 @@ function formatGuidelinesBlock(guidelines: GuidelineEntry[]): string {
 export function register(api: OpenClawPluginApi): void {
   const config: EvolveClawConfig = {
     serverUrl: "http://127.0.0.1:5757", agentName: "openclaw-agent", enabled: true,
-    injectMode: "append_system", maxGuidelines: 30, autoStartServer: true,
+    injectMode: "append_system", maxGuidelines: 30, maxPromptChars: 12_000, autoStartServer: true,
     ...api.pluginConfig,
   };
   if (!config.enabled) return;
-  const client = new ScopeClient(config.serverUrl);
+  const client = new ScopeClient(config.serverUrl, 10_000, config.sidecarToken);
   const sidecar = new Sidecar(api, client, config);
+  const registry = new ScopeRegistry(() => api.logger.warn("evolveclaw: recorded scope labels could not be saved; check the plugin state directory"));
   const sessions = new Map<string, Session>();
   const traces = new Map<string, Trace>();
   const strategic = new Map<string, GuidelineEntry[]>();
@@ -74,13 +78,16 @@ export function register(api: OpenClawPluginApi): void {
   let steps = 0;
   let synthesized = 0;
 
-  function getSession(ctx: Identity): Session | undefined {
-    const key = sessionKey(ctx);
-    if (!key) return undefined;
+  const memoryKey = (agent: string, scope: MemoryScope) => JSON.stringify([agent, scope]);
+
+  function getSession(ctx: Identity, scope: MemoryScope): Session | undefined {
+    const identityKey = sessionKey(ctx);
+    if (!identityKey) return undefined;
+    const key = JSON.stringify([identityKey, scope]);
     let session = sessions.get(key);
     if (!session) {
       const agentName = !ctx.agentId || ctx.agentId === "main" ? config.agentName : `${config.agentName}:${ctx.agentId}`;
-      session = { agentName, taskId: ctx.sessionId || ctx.sessionKey!, tactical: [], ended: false };
+      session = { agentName, taskId: ctx.sessionId || ctx.sessionKey!, identityKey, scope, tactical: [], ended: false };
       sessions.set(key, session);
     }
     return session;
@@ -92,32 +99,53 @@ export function register(api: OpenClawPluginApi): void {
     return key ? traces.get(key) : undefined;
   }
 
-  async function refreshRules(agentName: string): Promise<void> {
+  async function refreshRules(agentName: string, scope: MemoryScope): Promise<void> {
     if (!sidecar.compatible) return;
-    const revision = (ruleRevisions.get(agentName) ?? 0) + 1;
-    ruleRevisions.set(agentName, revision);
+    const key = memoryKey(agentName, scope);
+    const revision = (ruleRevisions.get(key) ?? 0) + 1;
+    ruleRevisions.set(key, revision);
     const generation = lifecycle;
-    const result = await client.getStrategicRules(agentName);
-    if (generation !== lifecycle || ruleRevisions.get(agentName) !== revision) return;
+    const result = await client.getStrategicRules(agentName, scope);
+    if (generation !== lifecycle || ruleRevisions.get(key) !== revision) return;
     if (!result || result.configured === false) return;
     const rules = result.guidelines ?? (result.rules ? [result.rules] : []);
-    strategic.set(agentName, rules.filter(Boolean).map((text) => ({ text, type: "strategic" })));
+    strategic.set(key, rules.filter(Boolean).map((text) => ({ text, type: "strategic" })));
   }
 
-  function refreshInBackground(agentName: string): void {
-    if (refreshes.has(agentName)) return;
+  function refreshInBackground(agentName: string, scope: MemoryScope): void {
+    const key = memoryKey(agentName, scope);
+    if (refreshes.has(key)) return;
     const generation = lifecycle;
-    const refresh = sidecar.configureIfNeeded().then(() => generation === lifecycle ? refreshRules(agentName) : undefined)
+    const refresh = sidecar.configureIfNeeded().then(() => generation === lifecycle ? refreshRules(agentName, scope) : undefined)
       .catch(() => api.logger.warn("evolveclaw: memory refresh unavailable"))
-      .finally(() => refreshes.delete(agentName));
-    refreshes.set(agentName, refresh);
+      .finally(() => refreshes.delete(key));
+    refreshes.set(key, refresh);
   }
+
+  registerMemoryControls(api, client, registry, (agentName, scope, snapshot) => {
+    // Audience-level revisions also protect project-spanning promoted guidance.
+    for (const b of registry.list(scopeFromAgent(agentName))) {
+      if (b.agentName !== agentName || b.scope.audience_key !== scope.audience_key) continue;
+      const key = memoryKey(agentName, b.scope);
+      ruleRevisions.set(key, (ruleRevisions.get(key) ?? 0) + 1);
+      strategic.delete(key);
+      refreshInBackground(agentName, b.scope);
+    }
+    if (snapshot.rules) for (const s of sessions.values()) {
+      if (memoryKey(s.agentName, s.scope) !== memoryKey(agentName, scope)) continue;
+      s.tactical = snapshot.rules.filter(r => r.type === "tactical" && r.status === "active" && r.task_id === s.taskId)
+        .map(r => ({ text: r.text, type: "tactical", guidelineId: r.id }));
+    }
+  });
+
+  function scopeFromAgent(name: string): string { return name === config.agentName ? "main" : name.slice(config.agentName.length + 1); }
 
   api.registerService({
     id: "evolveclaw-sidecar",
     async start(ctx) {
+      await registry.start(ctx.stateDir);
       await sidecar.start(ctx.stateDir);
-      await refreshRules(config.agentName);
+      for (const b of registry.list("main")) await refreshRules(b.agentName, b.scope);
     },
     async stop() {
       ++lifecycle;
@@ -125,23 +153,32 @@ export function register(api: OpenClawPluginApi): void {
       traces.clear(); sessions.clear(); strategic.clear();
       ruleRevisions.clear();
       await sidecar.stop();
+      await registry.flush();
     },
   });
 
   api.on("before_prompt_build", (event, ctx) => {
     if (excluded(ctx)) return {};
+    // A live audience is used only here for admission. Later reflection uses the
+    // admitted immutable trace, not a retired invocation's audience capability.
+    const scope = scopeFromContext(ctx);
+    if (!scope) return {};
     const key = traceKey(ctx);
-    const session = getSession(ctx);
+    const session = getSession(ctx, scope);
     if (!key || !session) return {};
+    registry.capture(ctx, session.agentName, scope);
     let trace = traces.get(key);
+    if (trace && memoryKey(trace.session.agentName, trace.session.scope) !== memoryKey(session.agentName, scope)) trace.scopeChanged = true;
     if (!trace) {
       trace = { session, prompt: event.currentUserMessage ?? event.prompt, systemPrompt: "", modelOutput: "", tools: [], observations: [] };
       traces.set(key, trace);
     }
     // Inject the cache immediately. Remote refresh cannot stall a user's prompt.
-    refreshInBackground(session.agentName);
+    refreshInBackground(session.agentName, scope);
     if (session.ended) return {};
-    const guidelines = capGuidelines(strategic.get(session.agentName) ?? [], session.tactical, config.maxGuidelines);
+    const guidelines = capGuidelines(strategic.get(memoryKey(session.agentName, scope)) ?? [], session.tactical, config.maxGuidelines);
+    if (!guidelines.length) return {};
+    while (guidelines.length && formatGuidelinesBlock(guidelines).length > config.maxPromptChars!) guidelines.pop();
     if (!guidelines.length) return {};
     const block = formatGuidelinesBlock(guidelines);
     return config.injectMode === "prepend_context" ? { prependContext: block } : { appendSystemContext: block };
@@ -176,7 +213,7 @@ export function register(api: OpenClawPluginApi): void {
     const trace = getTrace(identity);
     if (!key || !trace) return;
     traces.delete(key);
-    if (trace.session.ended || !sidecar.compatible || (!event.messages.length && !trace.modelOutput && !event.error)) return;
+    if (trace.session.ended || trace.scopeChanged || !sidecar.compatible || (!event.messages.length && !trace.modelOutput && !event.error)) return;
     const messages = messagesFrom(event.messages);
     const latestUser = messages.filter((m) => m.role === "user").at(-1);
     const lastAssistant = messages.filter((m) => m.role === "assistant").at(-1);
@@ -186,16 +223,17 @@ export function register(api: OpenClawPluginApi): void {
     const result = await client.onStepComplete({
       agent_name: trace.session.agentName, agent_role: "OpenClaw AI Assistant",
       task: (trace.prompt || extractText(latestUser?.content) || `Session ${trace.session.taskId}: agent task`).slice(0, 2000),
-      model_output: trace.modelOutput || extractText(lastAssistant?.content),
-      tool_calls: trace.tools.length ? trace.tools.join("\n---\n") : undefined,
-      observations: trace.observations.length ? trace.observations.join("\n---\n") : undefined,
-      error: event.error || trace.error, current_system_prompt: trace.systemPrompt,
+      model_output: (trace.modelOutput || extractText(lastAssistant?.content)).slice(-48_000),
+      tool_calls: trace.tools.length ? trace.tools.join("\n---\n").slice(-24_000) : undefined,
+      observations: trace.observations.length ? trace.observations.join("\n---\n").slice(-24_000) : undefined,
+      error: (event.error || trace.error)?.slice(0, 4_000), current_system_prompt: trace.systemPrompt.slice(0, 64_000),
       task_id: trace.session.taskId, conversation_history: history || undefined,
+      scope: trace.session.scope,
     });
     if (result?.guideline && !result.skipped && !trace.session.ended) {
       synthesized++;
       if (result.guideline_type === "strategic") {
-        await refreshRules(trace.session.agentName);
+        await refreshRules(trace.session.agentName, trace.session.scope);
       } else {
         trace.session.tactical.push({ text: result.guideline, type: "tactical", guidelineId: result.guideline_id });
         trace.session.tactical = trace.session.tactical.slice(-config.maxGuidelines);
@@ -207,12 +245,13 @@ export function register(api: OpenClawPluginApi): void {
 
   api.on("session_end", async (event, ctx) => {
     const key = sessionKey({ ...ctx, sessionId: event.sessionId, sessionKey: event.sessionKey ?? ctx.sessionKey });
-    const session = key ? sessions.get(key) : undefined;
-    if (!session) return;
-    session.ended = true;
-    sessions.delete(key!);
-    for (const [runKey, trace] of traces) if (trace.session === session) traces.delete(runKey);
-    await client.resetTactical(session.agentName, session.taskId);
+    for (const [storedKey, session] of sessions) {
+      if (session.identityKey !== key) continue;
+      session.ended = true;
+      sessions.delete(storedKey);
+      for (const [runKey, trace] of traces) if (trace.session === session) traces.delete(runKey);
+      await client.resetTactical(session.agentName, session.taskId, session.scope);
+    }
   });
   api.logger.info(`evolveclaw: registered (agent=${config.agentName}, inject=${config.injectMode})`);
 }

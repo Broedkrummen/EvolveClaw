@@ -14,7 +14,7 @@ const packed = Array.isArray(packedResult) ? packedResult[0] :
   packedResult.files ? packedResult : Object.values(packedResult).find((item) => item?.files);
 assert(packed?.files, `Unexpected npm pack metadata: ${JSON.stringify(packedResult)}`);
 const names = packed.files.map((f) => f.path);
-for (const required of ['dist/index.js', 'openclaw.plugin.json', 'server/server.py', 'server/task_optimizer.py', 'server/.env.template']) assert(names.includes(required), `${required} missing`);
+for (const required of ['dist/index.js', 'openclaw.plugin.json', 'server/server.py', 'server/task_optimizer.py', 'server/memory_store.py', 'server/.env.template', 'dist/control-ui/index.js', 'dist/control-ui/index.css']) assert(names.includes(required), `${required} missing`);
 assert(!names.some((p) => /(^|\/)\.env$|(^|\/)(venv|\.venv|scope_data|__pycache__)\//.test(p)), 'private/runtime files packed');
 
 const isolated = await mkdtemp(resolve(tmpdir(), 'evolveclaw-package-'));
@@ -41,6 +41,9 @@ try {
   assert.equal(entry.status, 'loaded');
   assert.equal(entry.hookCount, 7);
   assert(entry.services.includes('evolveclaw-sidecar'));
+  assert(entry.commands.includes('evolveclaw') && entry.commands.includes('evolveclaw-change'));
+  assert.equal(entry.controlUi.entry, 'dist/control-ui/index.js');
+  assert(entry.uiCapabilities.includes('page') && entry.uiCapabilities.includes('panel'));
   installed.plugins.entries.evolveclaw.hooks.allowConversationAccess = false;
   await writeFile(configPath, JSON.stringify(installed));
   const denied = parse((await run('plugins', 'inspect', 'evolveclaw', '--runtime', '--json')).stdout);
