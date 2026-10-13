@@ -24,8 +24,9 @@ from pydantic import BaseModel
 
 from config import ServerConfig
 from prompts import EVOLVECLAW_DOMAINS, get_custom_prompts
-from scope import SCOPEOptimizer
-from scope.models import create_litellm_model, create_openai_model
+from task_optimizer import TaskScopedOptimizer
+from scope.models import create_litellm_model
+from scope.models.openai_adapter import OpenAIAdapter
 from scope.models.anthropic_adapter import AnthropicAdapter
 
 logging.basicConfig(
@@ -38,13 +39,13 @@ cfg = ServerConfig()
 
 app = FastAPI(
     title="EvolveClaw SCOPE Server",
-    version="0.3.0",
+    version="0.4.0",
     description="Sidecar server for SCOPE prompt evolution with OpenClaw — self-improving agent loop",
 )
 
 # ── Model + optimizer initialization (supports lazy init) ──
 
-optimizer: SCOPEOptimizer | None = None
+optimizer: TaskScopedOptimizer | None = None
 
 
 def _create_model(provider: str, model_name: str, api_key: str | None, base_url: str | None):
@@ -58,14 +59,22 @@ def _create_model(provider: str, model_name: str, api_key: str | None, base_url:
         client = AsyncAnthropic(**client_kwargs)
         return AnthropicAdapter(client, model=model_name)
     if provider == "openai":
-        return create_openai_model(model_name, api_key=api_key)
-    return create_litellm_model(model_name, api_key=api_key, base_url=base_url)
+        from openai import AsyncOpenAI
+        kwargs = {}
+        if api_key:
+            kwargs["api_key"] = api_key
+        if base_url:
+            kwargs["base_url"] = base_url
+        return OpenAIAdapter(AsyncOpenAI(**kwargs), model=model_name)
+    if provider == "litellm":
+        return create_litellm_model(model_name, api_key=api_key, base_url=base_url)
+    raise ValueError("Unsupported SCOPE provider")
 
 
 def init_optimizer(provider: str, model_name: str, api_key: str | None, base_url: str | None):
     global optimizer
     model = _create_model(provider, model_name, api_key, base_url)
-    optimizer = SCOPEOptimizer(
+    optimizer = TaskScopedOptimizer(
         synthesizer_model=model,
         exp_path=cfg.SCOPE_DATA_PATH,
         enable_quality_analysis=cfg.SCOPE_QUALITY_ANALYSIS,
@@ -131,6 +140,8 @@ class StepResponse(BaseModel):
 class RulesResponse(BaseModel):
     rules: str = ""
     rule_count: int = 0
+    guidelines: list[str] = []
+    configured: bool = True
 
 class ResetRequest(BaseModel):
     agent_name: str
@@ -148,7 +159,8 @@ class ConfigureResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.3.0"
+    version: str = "0.4.0"
+    protocol_version: int = 2
     configured: bool = True
 
 class StatsResponse(BaseModel):
@@ -191,10 +203,10 @@ async def configure(req: ConfigureRequest):
 async def get_rules(agent_name: str):
     """Load persisted strategic rules for the given agent."""
     if optimizer is None:
-        return RulesResponse()
+        return RulesResponse(configured=False)
     rules_text = optimizer.get_strategic_rules_for_agent(agent_name)
-    rule_count = rules_text.strip().count("\n") + 1 if rules_text.strip() else 0
-    return RulesResponse(rules=rules_text, rule_count=rule_count)
+    guidelines = optimizer.strategic_guidelines(agent_name)
+    return RulesResponse(rules=rules_text, rule_count=len(guidelines), guidelines=guidelines)
 
 
 @app.post("/step", response_model=StepResponse)
@@ -219,7 +231,7 @@ async def on_step_complete(req: StepRequest):
     if not has_context:
         return StepResponse(skipped=True, reason="no context provided")
 
-    error_obj = Exception(req.error) if req.error else None
+    error_obj = Exception(req.error[:1000]) if req.error else None
 
     # Prepend conversation history to model_output so SCOPE sees
     # multi-turn context when synthesizing guidelines.
@@ -227,21 +239,22 @@ async def on_step_complete(req: StepRequest):
     if req.conversation_history:
         effective_output = (
             f"## Recent conversation history (previous turns):\n"
-            f"{req.conversation_history}\n\n"
-            f"## Current turn response:\n{effective_output}"
+            f"{req.conversation_history[-4000:]}\n\n"
+            f"## Current turn response:\n{effective_output[:12000]}"
         )
 
     try:
         result = await optimizer.on_step_complete(
             agent_name=req.agent_name,
             agent_role=req.agent_role,
-            task=req.task,
-            model_output=effective_output or None,
-            tool_calls=req.tool_calls,
-            observations=req.observations,
+            task=req.task[:2000],
+            model_output=effective_output[:18000] or None,
+            tool_calls=req.tool_calls[:12000] if req.tool_calls else None,
+            observations=req.observations[:12000] if req.observations else None,
             error=error_obj,
-            current_system_prompt=req.current_system_prompt,
+            current_system_prompt=req.current_system_prompt[:32000],
             task_id=req.task_id,
+            truncate_context=False,
         )
     except Exception as exc:
         logger.warning("SCOPE on_step_complete failed: %s", exc, exc_info=True)
@@ -276,10 +289,7 @@ async def reset_tactical(req: ResetRequest):
         return {"status": "ok"}
     logger.info("Tactical reset for agent=%s task=%s", req.agent_name, req.task_id)
     try:
-        if hasattr(optimizer, "reset_tactical"):
-            optimizer.reset_tactical(agent_name=req.agent_name, task_id=req.task_id)
-        elif hasattr(optimizer, "reset"):
-            optimizer.reset(agent_name=req.agent_name)
+        await optimizer.reset_tactical(agent_name=req.agent_name, task_id=req.task_id)
     except Exception as exc:
         logger.warning("Tactical reset failed: %s", exc)
     return {"status": "ok"}
@@ -293,8 +303,7 @@ async def get_stats(agent_name: str):
     """
     metrics = agent_metrics[agent_name]
 
-    rules_text = optimizer.get_strategic_rules_for_agent(agent_name) if optimizer else ""
-    strategic_count = rules_text.strip().count("\n") + 1 if rules_text.strip() else 0
+    strategic_count = len(optimizer.strategic_guidelines(agent_name)) if optimizer else 0
 
     rate = 0.0
     if metrics.total_steps > 0:
@@ -311,7 +320,7 @@ async def get_stats(agent_name: str):
 
 if __name__ == "__main__":
     uvicorn.run(
-        "server:app",
+        app,
         host=cfg.HOST,
         port=cfg.PORT,
         log_level="info",

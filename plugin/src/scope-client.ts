@@ -24,7 +24,7 @@ export class ScopeClient {
   }
 
   async health(): Promise<HealthResponse | null> {
-    return this.get<HealthResponse>("/health");
+    return this.get<HealthResponse>("/health", 1_000);
   }
 
   async getStrategicRules(agentName: string): Promise<RulesResponse | null> {
@@ -32,7 +32,7 @@ export class ScopeClient {
   }
 
   async onStepComplete(req: StepCompleteRequest): Promise<StepCompleteResponse | null> {
-    return this.post<StepCompleteResponse>("/step", req);
+    return this.post<StepCompleteResponse>("/step", req, 120_000);
   }
 
   async resetTactical(agentName: string, taskId?: string): Promise<void> {
@@ -49,14 +49,12 @@ export class ScopeClient {
 
   // ── Internal helpers ──
 
-  private async get<T>(path: string): Promise<T | null> {
+  private async get<T>(path: string, timeoutMs = this.timeoutMs): Promise<T | null> {
+    const signal = AbortSignal.timeout(timeoutMs);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       const res = await fetch(`${this.baseUrl}${path}`, {
-        signal: controller.signal,
+        signal,
       });
-      clearTimeout(timer);
       if (!res.ok) return null;
       return (await res.json()) as T;
     } catch {
@@ -64,17 +62,15 @@ export class ScopeClient {
     }
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T | null> {
+  private async post<T>(path: string, body: unknown, timeoutMs = this.timeoutMs): Promise<T | null> {
+    const signal = AbortSignal.timeout(timeoutMs);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       const res = await fetch(`${this.baseUrl}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal,
       });
-      clearTimeout(timer);
       if (!res.ok) return null;
       return (await res.json()) as T;
     } catch {

@@ -38,3 +38,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Local verification artifacts
+.pytest_cache/
+artifacts/
+*.tgz

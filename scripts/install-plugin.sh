@@ -4,92 +4,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo "EvolveClaw Plugin Installer"
-echo "==========================="
-echo ""
-
-# ── ClawHub install mode ──
 if [[ "${1:-}" == "--clawhub" ]]; then
-    echo "Installing from ClawHub..."
-    openclaw plugins install clawhub:evolveclaw
-
-    INSTALL_DIR="$HOME/.openclaw/extensions/evolveclaw"
-    if [ -f "$INSTALL_DIR/server/requirements.txt" ]; then
-        echo ""
-        echo "Installing Python dependencies..."
-        pip install -r "$INSTALL_DIR/server/requirements.txt"
-    fi
-
-    echo ""
-    echo "Done! Restart the gateway to activate:"
-    echo "  openclaw gateway restart"
-    exit 0
-fi
-
-# ── Local source install mode ──
-
-# Locate OpenClaw config
-OPENCLAW_CONFIG="${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}"
-
-if [ ! -f "$OPENCLAW_CONFIG" ]; then
-    echo "Error: OpenClaw config not found at $OPENCLAW_CONFIG"
-    echo "Make sure OpenClaw is installed: npm install -g openclaw@latest"
-    exit 1
-fi
-
-echo "Plugin source:  $PLUGIN_DIR"
-echo "OpenClaw config: $OPENCLAW_CONFIG"
-echo ""
-
-# Install Python dependencies
-if [ -f "$PLUGIN_DIR/server/requirements.txt" ]; then
-    echo "Installing Python dependencies..."
-    pip install -r "$PLUGIN_DIR/server/requirements.txt"
-    echo ""
-fi
-
-# Try native install first (copy mode)
-if openclaw plugins install "$PLUGIN_DIR" 2>/dev/null; then
-    echo ""
-    echo "Installed via openclaw plugins install."
+    openclaw plugins install clawhub:evolveclaw --accept-capabilities
 else
-    echo "Native install not supported for local paths on this version."
-    echo "Configuring plugins.load.paths instead..."
-    echo ""
-
-    # Use node to safely modify the JSON config
-    node -e "
-const fs = require('fs');
-const cfg = JSON.parse(fs.readFileSync('$OPENCLAW_CONFIG', 'utf8'));
-
-if (!cfg.plugins) cfg.plugins = {};
-if (!cfg.plugins.load) cfg.plugins.load = {};
-if (!Array.isArray(cfg.plugins.load.paths)) cfg.plugins.load.paths = [];
-
-const pluginPath = '$PLUGIN_DIR';
-if (!cfg.plugins.load.paths.includes(pluginPath)) {
-    cfg.plugins.load.paths.push(pluginPath);
-    console.log('Added plugin path to plugins.load.paths');
-} else {
-    console.log('Plugin path already in plugins.load.paths');
-}
-
-if (!cfg.plugins.entries) cfg.plugins.entries = {};
-if (!cfg.plugins.entries.evolveclaw) {
-    cfg.plugins.entries.evolveclaw = { enabled: true };
-    console.log('Enabled evolveclaw in plugins.entries');
-} else {
-    cfg.plugins.entries.evolveclaw.enabled = true;
-    console.log('evolveclaw already in plugins.entries');
-}
-
-fs.writeFileSync('$OPENCLAW_CONFIG', JSON.stringify(cfg, null, 2) + '\n');
-"
+    cd "$PLUGIN_DIR"
+    if [[ -f package-lock.json ]]; then
+        npm ci --ignore-scripts
+        npm run build
+    elif [[ ! -f dist/index.js ]]; then
+        echo "Missing built plugin. Use a source checkout or the release package."
+        exit 1
+    fi
+    openclaw plugins install --link "$PLUGIN_DIR" --force --accept-capabilities
 fi
 
-echo ""
-echo "Done! Restart the gateway to activate:"
-echo "  openclaw gateway restart"
-echo ""
-echo "Verify with:"
-echo "  openclaw plugins list | grep evolveclaw"
+# Conversation access is necessary for trace learning, and prompt access for injection.
+openclaw config set plugins.entries.evolveclaw.hooks.allowConversationAccess true
+openclaw config set plugins.entries.evolveclaw.hooks.allowPromptInjection true
+openclaw plugins enable evolveclaw
+openclaw plugins inspect evolveclaw --runtime --json
+
+echo "EvolveClaw installed and enabled. Verify learning with a conversation turn."
+echo "For a separately managed sidecar, run scripts/start-server.sh."

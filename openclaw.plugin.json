@@ -1,6 +1,9 @@
 {
   "id": "evolveclaw",
   "name": "EvolveClaw",
+  "version": "0.2.0",
+  "categories": ["developer-tools"],
+  "activation": { "onStartup": true, "onCapabilities": ["hook"] },
   "description": "Self-improving agent prompt evolution — synthesizes, manages, and refines guidelines from execution traces via SCOPE.",
   "configSchema": {
     "type": "object",
@@ -24,7 +27,7 @@
         "default": "append_system"
       },
       "maxGuidelines": {
-        "type": "number",
+        "type": "integer",
         "default": 30,
         "minimum": 5,
         "maximum": 200
@@ -47,6 +50,9 @@
         "default": true
       },
       "pythonPath": {
+        "type": "string"
+      },
+      "dataPath": {
         "type": "string"
       }
     }
@@ -82,6 +88,7 @@
     },
     "scopeApiKey": {
       "label": "SCOPE API Key Override",
+      "sensitive": true,
       "help": "Override the API key used by SCOPE. Defaults to OpenClaw's configured key for the primary model provider."
     },
     "scopeBaseUrl": {
@@ -95,6 +102,10 @@
     "pythonPath": {
       "label": "Python Path",
       "help": "Full path to the Python binary (e.g. /usr/bin/python3). Auto-detected if not set."
+    },
+    "dataPath": {
+      "label": "SCOPE Data Directory",
+      "help": "Optional absolute path to existing SCOPE data. Defaults to stable OpenClaw state storage; existing server/scope_data is reused when present."
     }
   }
 }
