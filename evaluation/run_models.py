@@ -295,7 +295,7 @@ class ActualMemoryAdapter:
             return {"strategic": strategic, "tactical": [text for text in applied if text not in strategic]}
         return {"strategic": strategic, "tactical": list(self.tactical.get(session_id, []))}
 
-    async def finish(self, guidance, response, *, feedback=False):
+    async def finish(self, guidance, response, *, feedback=False, execution_failure=None):
         if self.optimizer is None:
             return {"accepted": False, "reason": "learning-disabled"}
         scope = deepcopy(guidance.public_task["scope"])
@@ -306,6 +306,12 @@ class ActualMemoryAdapter:
         observations = json.dumps([s["observations"] for s in steps if s["observations"]], allow_nan=False)
         error = next((s["error"] for s in reversed(steps) if s["error"]), None)
         output = json.dumps(response, allow_nan=False)
+        if execution_failure:
+            # The solver produced no final response. Reflection sees the public
+            # cap error and unfinished model output, never the grader's result.
+            error = execution_failure["message"]
+            output = json.dumps({"execution_failure": execution_failure,
+                "unfinished_model_output": "\n".join(s["model_output"] for s in steps)[-12000:]}, allow_nan=False)
         if guidance.prior_history:
             label = "Recent conversation history (previous turns)" if self.condition == "repaired-v0.2" else "Recent conversation history"
             output = (f"## {label}:\n{guidance.prior_history[-4000:]}\n\n"
@@ -330,6 +336,8 @@ class ActualMemoryAdapter:
                  "task_id": guidance.public_task["task_id"], "session_id": guidance.session_id,
                  "accepted": result is not None,
                  "guideline": result[0] if result else None, "type": result[1] if result else None}
+        if execution_failure:
+            event["execution_failure"] = deepcopy(execution_failure)
         if self.condition == "improved" and result:
             event["rule_id"] = result.rule_id
             if feedback:
@@ -457,7 +465,7 @@ def _condition_reports(results, conditions, usage):
 
 
 async def _run_sequence(sequence, condition, directory, model, max_steps):
-    from .real_agent import FakeWorldModelAgent
+    from .real_agent import AgentExecutionError, FakeWorldModelAgent
     from .scope_paper import PaperConfig, ScopePaperController
     directory.mkdir(parents=True, exist_ok=False)
     learner_model = model.for_stage(f"{condition}:learning")
@@ -475,7 +483,7 @@ async def _run_sequence(sequence, condition, directory, model, max_steps):
     else:
         adapter = ActualMemoryAdapter(condition, learner_model, directory / "memory")
         controller = None
-    records, public_events, trace = [], [], []
+    records, public_events, trace, execution_runs = [], [], [], []
     failed_before, corrected, history = set(), set(), {}
     for index, event in enumerate(sequence.events):
         scope = event.scope.to_dict()
@@ -501,8 +509,28 @@ async def _run_sequence(sequence, condition, directory, model, max_steps):
             public = {"event": "task", **task.public_request()}
         public_events.append(public)
         started = perf_counter()
+        execution_failure = None
+
+        def cap_failure(exc):
+            return {"kind": exc.kind, "error_type": type(exc).__name__,
+                    "role": exc.role, "limit": exc.limit, "message": str(exc)[:1000]}
+
+        def retain_runs(agent, perspective, failure=None, error=None):
+            # Persist before terminal reflection or controller error handling,
+            # so even an aborted infrastructure run keeps its executor trace.
+            entry = {"task_id": task.task_id, "perspective": perspective,
+                     "runs": deepcopy(agent.last_runs)}
+            if failure:
+                entry["execution_failure"] = deepcopy(failure)
+            elif error:
+                entry["error_type"] = type(error).__name__
+            execution_runs.append(deepcopy(entry))
+            _write(directory / "raw_execution_runs.json", execution_runs)
+            return entry
+
         if controller:
             callbacks = []
+            callback_errors = {}
             async def execute(public_task, perspective, guidance):
                 # A fresh fixture agent and bind create a different FakeWorld
                 # for every parallel callback. Neither world nor mutable trace
@@ -525,21 +553,47 @@ async def _run_sequence(sequence, condition, directory, model, max_steps):
 
                 agent = FakeWorldModelAgent(model.for_stage(f"{condition}:assistant:{perspective}"),
                                            max_steps=max_steps, hierarchical=True)
-                response = await agent.bind(deepcopy(task))(deepcopy(public_task), perspective, ProgressGuidance())
-                callbacks.append({"perspective": perspective, "runs": deepcopy(agent.last_runs)})
-                return response
+                failure, execution_error = None, None
+                try:
+                    return await agent.bind(deepcopy(task))(deepcopy(public_task), perspective, ProgressGuidance())
+                except AgentExecutionError as exc:
+                    failure, execution_error = cap_failure(exc), exc
+                    callback_errors[perspective] = exc
+                    raise  # Keep the paper controller's actual error status.
+                except BaseException as exc:
+                    execution_error = exc
+                    callback_errors[perspective] = exc
+                    raise
+                finally:
+                    try:
+                        callbacks.append(retain_runs(agent, perspective, failure, execution_error))
+                    except BaseException as exc:
+                        # A trace-write error replaces the callback exception;
+                        # it must not be mistaken for a captured solver cap.
+                        callback_errors[perspective] = exc
+                        raise
             # Experiment isolation is required, but the published paper does
             # not add EvolveClaw's user/project memory admission or routing.
             # Scope labels remain normal public task context for the model.
             perspectives = await controller.run_task(task.public_request(), execute,
                                                        namespace={"sequence_id": sequence.sequence_id})
             primary = next(p for p in perspectives if p.perspective == "efficiency")
-            if any(p.status != "completed" for p in perspectives):
+            failed_perspectives = [p for p in perspectives if p.status != "completed"]
+            fatal = [callback_errors.get(p.perspective) for p in failed_perspectives
+                     if not isinstance(callback_errors.get(p.perspective), AgentExecutionError)]
+            if fatal:
                 _write(directory / "incomplete_perspectives.json", [p.to_dict() for p in perspectives])
-                raise RuntimeError("Paper execution failed; no complete-condition comparison is available")
-            response = primary.response if isinstance(primary.response, dict) else {}
+                # The controller captures execution exceptions as result data;
+                # infrastructure/budget failures must still abort this cohort.
+                raise next((error for error in fatal if error is not None),
+                           RuntimeError("Paper execution failed; no complete-condition comparison is available"))
+            failures = {p.perspective: cap_failure(callback_errors[p.perspective]) for p in failed_perspectives}
+            execution_failure = failures.get(primary.perspective)
+            response = primary.response if primary.status == "completed" and isinstance(primary.response, dict) else {}
             details = {"perspectives": [p.to_dict() for p in perspectives], "callbacks": callbacks,
                        "response_selection": "fixed-efficiency-before-scoring"}
+            if failures:
+                details["perspective_execution_failures"] = failures
             learning = None
         else:
             guidance_type = SDKGuidance if condition == "scope_sdk_reference" else TerminalGuidance
@@ -548,28 +602,54 @@ async def _run_sequence(sequence, condition, directory, model, max_steps):
             prior_history = "\n".join(f"[{role}]: {content[:300]}" for role, content in prior[-10:])
             guidance = guidance_type(condition, adapter, task.public_request(), actual_task_id, prior_history)
             agent = FakeWorldModelAgent(model.for_stage(f"{condition}:assistant"), max_steps=max_steps)
-            response = await agent.bind(deepcopy(task))(task.public_request(), "default", guidance)
-            learning = await adapter.finish(guidance, response, feedback=feedback) if condition != "scope_sdk_reference" else {
+            execution_error = None
+            try:
+                response = await agent.bind(deepcopy(task))(task.public_request(), "default", guidance)
+            except AgentExecutionError as exc:
+                execution_failure, execution_error = cap_failure(exc), exc
+                response = {}  # No final answer, including for a negative expected answer.
+            except BaseException as exc:
+                execution_error = exc
+                raise
+            finally:
+                retain_runs(agent, "default", execution_failure, execution_error)
+            learning = await adapter.finish(guidance, response, feedback=feedback,
+                execution_failure=execution_failure) if condition != "scope_sdk_reference" else {
                 "accepted": False, "reason": "already-observed-each-executor-step"}
             details = {"steps": deepcopy(guidance.steps), "runs": deepcopy(agent.last_runs), "memory": learning}
-        history.setdefault(session_id, []).extend([("user", task.instruction), ("assistant", json.dumps(response))])
+        if execution_failure:
+            details["execution_failure"] = execution_failure
+        history_response = {"execution_failure": execution_failure, "response": None} if execution_failure else response
+        history.setdefault(session_id, []).extend([("user", task.instruction), ("assistant", json.dumps(history_response))])
         elapsed = perf_counter() - started
         row = {"event": "feedback" if feedback else "task", "request": public, "response": response, **details}
         if not feedback:
             key = sequence.scoring_keys[task.task_id]
             score = score_response(response, key)
+            if execution_failure:
+                score["success"] = False
             mistake_context = (scope["audience_key"], scope["project_key"], key.mistake_key)
             eligible = mistake_context in failed_before and mistake_context in corrected
             record = {"task_id": task.task_id, "phase": task.phase, **score,
                       "repeated_mistake_eligible": eligible, "repeated_mistake": bool(eligible and not score["success"]),
                       "elapsed_seconds": elapsed}
+            if execution_failure:
+                record["execution_failure"] = deepcopy(execution_failure)
+            if controller and failures:
+                record["perspective_execution_failures"] = deepcopy(failures)
             records.append(record)
             row["scoring"] = record
             if not score["success"] and key.mistake_key:
                 failed_before.add(mistake_context)
             if controller:
-                row["perspective_scoring"] = {p.perspective: score_response(
-                    p.response if isinstance(p.response, dict) else {}, key) for p in perspectives}
+                row["perspective_scoring"] = {}
+                for perspective in perspectives:
+                    perspective_score = score_response(perspective.response
+                        if perspective.status == "completed" and isinstance(perspective.response, dict) else {}, key)
+                    if perspective.status != "completed":
+                        perspective_score["success"] = False
+                        perspective_score["execution_failure"] = failures[perspective.perspective]
+                    row["perspective_scoring"][perspective.perspective] = perspective_score
         trace.append(row)
     _write(directory / "public_requests.json", public_events)
     # This is explicitly scorer-only output; the assistant has no filesystem

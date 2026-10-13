@@ -456,6 +456,172 @@ class ModelIntegrationTests(unittest.TestCase):
             self.assertFalse(aborted["efficacy_evidence"])
             self.assertFalse((output / "summary.json").exists())
 
+    def test_flat_solver_limits_score_failed_tasks_and_keep_raw_reflection(self):
+        class NeverFinishes(FixtureTransport):
+            async def __call__(self, url, payload, headers, timeout):
+                if payload["messages"][0]["role"] != "system":
+                    return await super().__call__(url, payload, headers, timeout)
+                self.requests.append(deepcopy(payload))
+                public = json.loads(payload["messages"][1]["content"])
+                # Repeated actual fake-tool calls never produce a final answer.
+                response = {"tool_calls": public["tools"], "answer": None}
+                return {"choices": [{"message": {"content": json.dumps(response)}}],
+                        "usage": {"prompt_tokens": 80, "completion_tokens": 30}}
+        transport = NeverFinishes()
+        conditions = tuple(condition for condition in CONDITIONS if condition != "scope_paper_k2_n2")
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "flat-caps"
+            summary = asyncio.run(run_model_evaluation(configuration(), output, conditions=conditions,
+                sequence_limit=1, transport=transport, offline_mock=True, max_steps=2))
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["sequence_runs"], 4)
+            for condition in conditions:
+                metric = summary["conditions"][condition]["metrics"]["future_task_success"]
+                self.assertEqual((metric["count"], metric["denominator"]), (0, 2))
+                directory = next((output / "run-001" / condition).iterdir())
+                rows = json.loads((directory / "scorer_only_trace.json").read_text())
+                raw = json.loads((directory / "raw_execution_runs.json").read_text())
+                self.assertEqual(len(raw), 4)
+                for row in rows:
+                    self.assertEqual(row["response"], {})
+                    self.assertEqual(row["execution_failure"]["kind"], "step-limit-exceeded")
+                    self.assertEqual(row["execution_failure"]["limit"], 2)
+                    if row["event"] == "task":
+                        # Missing completion is a failure even when the fixture
+                        # expects completed=False for an unsuccessful operation.
+                        self.assertFalse(row["scoring"]["success"])
+                        self.assertIn("completed", row["scoring"]["failed_fields"])
+                        self.assertEqual(row["scoring"]["execution_failure"]["role"], "Planner")
+                for entry in raw:
+                    self.assertEqual(entry["runs"][0]["status"], "step-limit-exceeded")
+                    self.assertEqual(len(entry["runs"][0]["steps"]), 2)
+                    self.assertIsNone(entry["runs"][0]["response"])
+                    self.assertEqual(entry["execution_failure"]["limit"], 2)
+                if condition in ("repaired-v0.2", "improved"):
+                    events = json.loads((directory / "memory/learning_events.json").read_text())
+                    self.assertTrue(events)
+                    self.assertTrue(all(event["execution_failure"]["limit"] == 2 for event in events))
+                if condition == "scope_sdk_reference":
+                    events = json.loads((directory / "memory/learning_events.json").read_text())
+                    self.assertEqual(len(events), 8)  # Two original step reflections per task/feedback.
+                    self.assertTrue(all(event["operation"] == "upstream-step-reflection" for event in events))
+        requests = json.dumps(transport.requests)
+        self.assertIn("unfinished_model_output", requests)
+        self.assertIn("step-limit-exceeded", requests)
+        for grading_field in ("failed_fields", "required_fields", "scoring_keys"):
+            self.assertNotIn(grading_field, requests)
+
+    def test_paper_solver_limits_keep_error_status_and_fixed_primary_scoring(self):
+        from evaluation.real_agent import AgentExecutionError, FakeWorldModelAgent
+        from evaluation.scenarios import FakeWorld
+        for failed in ({"efficiency", "thoroughness"}, {"efficiency"}, {"thoroughness"}):
+            with self.subTest(failed=sorted(failed)):
+                async def run_task(agent, task, perspective="single", guidance=None):
+                    failure = AgentExecutionError("The bounded Planner invocation reached its 20-step limit without a final answer",
+                                                  role="Planner", limit=20) if perspective in failed else None
+                    world = FakeWorld(task)
+                    observations = [world.call(tool.name, tool.arguments) for tool in task.tools]
+                    answer = ({"completed": observations[0]["status"] == "completed"} if observations
+                              else {"acknowledged": True})
+                    text = json.dumps({"tool_calls": [], "answer": None if failure else answer})
+                    agent.last_runs.append({"task_id": task.task_id, "perspective": perspective,
+                        "status": "step-limit-exceeded" if failure else "completed",
+                        "response": None if failure else answer,
+                        "steps": [{"model_output": text, "observations": observations}],
+                        "tool_calls": deepcopy(world.calls), "hierarchical": True,
+                        "role_invocations": [{"role": "Planner", "max_steps": 20}]})
+                    await guidance.observe_step("Planner", "Offline bounded executor prompt", model_output=text,
+                        observations=json.dumps(observations), error=ValueError("No final answer") if failure else None)
+                    if failure:
+                        raise failure
+                    return answer
+                with tempfile.TemporaryDirectory() as tmp, patch.object(FakeWorldModelAgent, "run_task", new=run_task):
+                    output = Path(tmp) / "paper-caps"
+                    summary = asyncio.run(run_model_evaluation(configuration(), output,
+                        conditions=("scope_paper_k2_n2",), sequence_limit=1,
+                        transport=FixtureTransport(), offline_mock=True))
+                    metric = summary["conditions"]["scope_paper_k2_n2"]["metrics"]["future_task_success"]
+                    self.assertEqual(summary["status"], "completed")
+                    primary_failed = "efficiency" in failed
+                    self.assertEqual((metric["count"], metric["denominator"]), (0 if primary_failed else 2, 2))
+                    directory = next((output / "run-001/scope_paper_k2_n2").iterdir())
+                    rows = json.loads((directory / "scorer_only_trace.json").read_text())
+                    raw = json.loads((directory / "raw_execution_runs.json").read_text())
+                    self.assertEqual(len(raw), 8)
+                    self.assertFalse((directory / "incomplete_perspectives.json").exists())
+                    for row in rows:
+                        self.assertEqual(row["response_selection"], "fixed-efficiency-before-scoring")
+                        if primary_failed:
+                            self.assertEqual(row["response"], {})
+                            self.assertEqual(row["execution_failure"]["limit"], 20)
+                        else:
+                            self.assertNotIn("execution_failure", row)
+                            self.assertTrue(row["response"])
+                        for result in row["perspectives"]:
+                            expected = "error" if result["perspective"] in failed else "completed"
+                            self.assertEqual(result["status"], expected)
+                        self.assertTrue(all(callback["runs"] for callback in row["callbacks"]))
+                        if row["event"] == "task":
+                            self.assertEqual(row["scoring"]["success"], not primary_failed)
+                            self.assertEqual(row["perspective_scoring"]["efficiency"]["success"], not primary_failed)
+                            self.assertEqual(row["perspective_scoring"]["thoroughness"]["success"],
+                                             "thoroughness" not in failed)
+                            self.assertEqual(set(row["scoring"]["perspective_execution_failures"]), failed)
+
+    def test_paper_cap_trace_persistence_error_still_aborts(self):
+        from evaluation import run_models as runner
+        from evaluation.real_agent import AgentExecutionError, FakeWorldModelAgent
+        original_write = runner._write
+        injected = 0
+        async def run_task(agent, task, perspective="single", guidance=None):
+            agent.last_runs.append({"task_id": task.task_id, "status": "step-limit-exceeded", "steps": []})
+            raise AgentExecutionError("Offline bounded Planner limit", role="Planner", limit=20)
+        def write_once(path, value):
+            nonlocal injected
+            if path.name == "raw_execution_runs.json" and not injected:
+                injected += 1
+                raise OSError("One-shot raw trace persistence failure")
+            return original_write(path, value)
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(FakeWorldModelAgent, "run_task", new=run_task), \
+             patch.object(runner, "_write", side_effect=write_once):
+            output = Path(tmp) / "paper-cap-write-error"
+            with self.assertRaisesRegex(OSError, "One-shot raw trace persistence failure"):
+                asyncio.run(run_model_evaluation(configuration(), output,
+                    conditions=("scope_paper_k2_n2",), sequence_limit=1,
+                    transport=FixtureTransport(), offline_mock=True))
+            self.assertEqual(injected, 1)
+            self.assertFalse((output / "summary.json").exists())
+            self.assertEqual(json.loads((output / "incomplete.json").read_text())["error_type"], "OSError")
+
+    def test_non_solver_errors_still_abort_flat_and_paper_cohorts_with_raw_runs(self):
+        from evaluation.real_agent import FakeWorldModelAgent
+        from evaluation.openclaw_transport import NativeOpenClawError
+        for condition in ("learning-off", "scope_paper_k2_n2"):
+            for original in (NativeOpenClawError("offline-native-failure"),
+                             BudgetExceeded("Offline budget failure"), RuntimeError("Unexpected offline executor failure")):
+                with self.subTest(condition=condition, error=type(original).__name__):
+                    async def run_task(agent, task, perspective="single", guidance=None):
+                        agent.last_runs.append({"task_id": task.task_id, "perspective": perspective,
+                            "status": "failed", "error_type": type(original).__name__,
+                            "response": None, "steps": [{"model_output": "Unfinished offline execution"}]})
+                        raise original
+                    with tempfile.TemporaryDirectory() as tmp, patch.object(FakeWorldModelAgent, "run_task", new=run_task):
+                        output = Path(tmp) / "infrastructure-failure"
+                        with self.assertRaises(type(original)) as raised:
+                            asyncio.run(run_model_evaluation(configuration(), output,
+                                conditions=(condition,), sequence_limit=1,
+                                transport=FixtureTransport(), offline_mock=True))
+                        self.assertIs(raised.exception, original)
+                        self.assertFalse((output / "summary.json").exists())
+                        aborted = json.loads((output / "incomplete.json").read_text())
+                        self.assertEqual(aborted["error_type"], type(original).__name__)
+                        directory = next((output / "run-001" / condition).iterdir())
+                        raw = json.loads((directory / "raw_execution_runs.json").read_text())
+                        self.assertEqual(len(raw), 2 if condition == "scope_paper_k2_n2" else 1)
+                        self.assertTrue(all(entry["runs"][0]["status"] == "failed" for entry in raw))
+                        self.assertTrue(all("execution_failure" not in entry for entry in raw))
+
     def test_actual_scoping_and_feedback_history_undo_preserve_unrelated_rule(self):
         async def exercise(directory):
             model = BudgetedModel(configuration(opt_in=True), transport=FixtureTransport())

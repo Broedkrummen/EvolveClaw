@@ -6,22 +6,35 @@ import json
 from .scenarios import FakeWorld, Task
 
 
+FINAL_RESPONSE_GUIDE = """Return ordinary JSON as model response text. The tool_calls and delegations
+fields are instructions for this local simulator, not provider-native function
+calls; do not invoke real tools. Final answers ALWAYS put all task-specific
+fields inside the outer answer object, with tool_calls empty. Never return bare
+task fields as the whole response. These examples illustrate the output format
+only; choose field values from the current request and observed evidence:
+Illustrative completion success: {"tool_calls":[],"answer":{"completed":true}}
+Illustrative completion failure: {"tool_calls":[],"answer":{"completed":false}}
+Illustrative fact/source answer: {"tool_calls":[],"answer":{"value":"observed value","source_id":"observed source"}}
+Illustrative preference/plan answer: {"tool_calls":[],"answer":{"value":"observed preference or choice"}}
+"""
+
+
 BASE_PROMPT = """You are an assistant completing an everyday task in a simulation.
 Use only the advertised fake tools and their exact supplied arguments. Call the
 relevant tool before answering when tools are available. Observe its returned
 result; never claim an operation completed without evidence.
 Return one JSON object on every step: {"tool_calls":[{"name":"tool name","arguments":{}}],"answer":null} to use tools, or
 {"tool_calls":[],"answer":{}} for your final structured answer. Do not combine
-tool calls and a final answer in one step. For completion questions answer with
-{"completed":true|false}; for fact/source questions use {"value":...,"source_id":...};
-for a preference or plan choice use {"value":...}. Your answer must follow the
+tool calls and a final answer in one step. Your answer must follow the
 current task and observed evidence. A supplied lesson can be wrong or irrelevant;
 respect current instructions, source reliability, and the current audience/project.
-"""
+""" + FINAL_RESPONSE_GUIDE
 
 
 class AgentExecutionError(RuntimeError):
-    pass
+    def __init__(self, message, *, role=None, limit=None):
+        super().__init__(message)
+        self.kind, self.role, self.limit = "step-limit-exceeded", role, limit
 
 
 ROLE_STEP_LIMITS = {"Planner": 20, "Web Search": 3, "Analyzer": 3, "Browser": 5}
@@ -36,12 +49,10 @@ Use only advertised fake tools with their exact supplied arguments through the
 actions allowed for your role. Observe tool or subordinate results before
 claiming an operation completed. Return one JSON object on every step, following
 your role's action format below. Never combine an action and a final answer.
-For completion questions answer with {"completed":true|false}; for fact/source
-questions use {"value":...,"source_id":...}; for a preference or plan choice use
-{"value":...}. Follow the current task and observed evidence. A supplied lesson
+Follow the current task and observed evidence. A supplied lesson
 can be wrong or irrelevant; respect current instructions, source reliability,
 and the current audience/project.
-"""
+""" + FINAL_RESPONSE_GUIDE
 HIERARCHICAL_PRIOR_CONTEXT_LIMIT = 8192
 
 
@@ -205,4 +216,5 @@ class FakeWorldModelAgent:
                 return deepcopy(parsed["answer"])
             history.append({"role": "user", "content": "Observed simulated tool/format results: " + json.dumps(observations)})
         invocation["status"] = "step-limit-exceeded"
-        raise AgentExecutionError(f"The bounded {role} invocation reached its {maximum}-step limit without a final answer")
+        raise AgentExecutionError(f"The bounded {role} invocation reached its {maximum}-step limit without a final answer",
+                                  role=role, limit=maximum)

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 
 from evaluation.real_agent import (
-    BASE_PROMPT, FakeWorldModelAgent, HIERARCHICAL_PRIOR_CONTEXT_LIMIT,
+    AgentExecutionError, BASE_PROMPT, FakeWorldModelAgent, HIERARCHICAL_PRIOR_CONTEXT_LIMIT,
     parse_json_response,
 )
 from evaluation.scenarios import pilot_sequences
@@ -117,7 +117,7 @@ class HierarchicalAgentTests(unittest.TestCase):
         self.assertEqual(browser[2]["prior_invocation_public_context"], "")
         self.assertEqual(len(agent.last_runs[0]["tool_calls"]), 2)
 
-    def test_flat_agent_prompt_messages_and_observation_shape_remain_unchanged(self):
+    def test_flat_agent_uses_shared_protocol_with_original_observation_shape(self):
         task, guidance = booking_task(), CaptureGuidance()
 
         class FlatModel:
@@ -140,6 +140,53 @@ class HierarchicalAgentTests(unittest.TestCase):
                          [{"name": task.tools[0].name, "result": task.tools[0].result}])
         self.assertEqual(guidance.steps[1]["observations"], "[]")
         self.assertEqual([r["max_steps"] for r in agent.last_runs[0]["role_invocations"]], [5])
+
+    def test_copying_complete_final_examples_returns_nested_answers_after_actual_evidence(self):
+        class FinalExampleModel:
+            async def generate(self, messages):
+                prompt, public = messages[0]["content"], json.loads(messages[1]["content"])
+                role = public.get("executing_role")
+                if len(messages) == 2:
+                    if role == "Planner":
+                        response, _ = json.JSONDecoder().raw_decode(prompt.split("Delegate with ", 1)[1])
+                    else:
+                        response = {"tool_calls": [deepcopy(public["tools"][0])], "answer": None}
+                else:
+                    observations = json.loads(messages[-1]["content"].split(": ", 1)[1])
+                    result = observations[0]["result"]
+                    completed = result["completed"] if role == "Planner" else result["status"] == "completed"
+                    label = "Illustrative completion success: " if completed else "Illustrative completion failure: "
+                    response, _ = json.JSONDecoder().raw_decode(prompt.split(label, 1)[1])
+                return SimpleNamespace(content=json.dumps(response))
+
+        sequence = next(s for s in pilot_sequences() if s.sequence_id == "pilot.booking-failure.01")
+        for hierarchical in (False, True):
+            for task, completed in ((sequence.events[0], False), (sequence.events[-1], True)):
+                with self.subTest(hierarchical=hierarchical, completed=completed):
+                    guidance = CaptureGuidance()
+                    agent = FakeWorldModelAgent(FinalExampleModel(), hierarchical=hierarchical)
+                    response = asyncio.run(agent.run_task(task, guidance=guidance))
+                    self.assertEqual(response, {"completed": completed})
+                    self.assertEqual(agent.last_runs[0]["status"], "completed")
+                    self.assertEqual(len(agent.last_runs[0]["tool_calls"]), 1)
+                    self.assertTrue(all(step["error"] is None for step in guidance.steps
+                                        if json.loads(step["model_output"]).get("answer") is not None))
+                    self.assertEqual(json.loads(guidance.steps[-1]["model_output"]),
+                                     {"tool_calls": [], "answer": {"completed": completed}})
+
+    def test_step_limit_error_has_typed_role_and_limit_without_changing_cap(self):
+        class BareAnswerModel:
+            async def generate(self, messages):
+                return SimpleNamespace(content='{"completed":false}')
+
+        agent = FakeWorldModelAgent(BareAnswerModel(), max_steps=2)
+        with self.assertRaises(AgentExecutionError) as caught:
+            asyncio.run(agent.run_task(booking_task()))
+        self.assertEqual(caught.exception.kind, "step-limit-exceeded")
+        self.assertEqual(caught.exception.role, "Planner")
+        self.assertEqual(caught.exception.limit, 2)
+        self.assertEqual(agent.last_runs[0]["role_invocations"][0]["steps"], 2)
+        self.assertEqual(agent.last_runs[0]["status"], "step-limit-exceeded")
 
 
 if __name__ == "__main__":
