@@ -24,9 +24,9 @@ def envelope(**changes):
 
 
 class NativeTransportTests(unittest.TestCase):
-    def setup_cli(self, directory, reply=None, *, stderr="", exit_code=0, raw_stdout=None):
+    def setup_cli(self, directory, reply=None, *, stderr="", exit_code=0, raw_stdout=None, json_mode=False):
         paths = prepare_native_workspace(directory / "native", max_input_tokens=131072,
-                                         max_output_tokens=256)
+                                         max_output_tokens=256, json_mode=json_mode)
         cli = directory / "offline-openclaw"
         log = directory / "requests.json"
         # JSON literals become Python string literals via repr, preventing
@@ -39,7 +39,8 @@ class NativeTransportTests(unittest.TestCase):
         cli.write_text(source)
         cli.chmod(0o700)
         transport = NativeOpenClawTransport(cli, paths["config_path"], paths["workspace_path"],
-            model="mimo-v2.6-flash", max_input_tokens=131072, max_output_tokens=256)
+            model="mimo-v2.6-flash", max_input_tokens=131072, max_output_tokens=256,
+            json_mode=json_mode)
         return transport, log, paths
 
     def request(self, transport, **changes):
@@ -135,6 +136,115 @@ class NativeTransportTests(unittest.TestCase):
                 NativeOpenClawTransport(transport.cli_path, paths["config_path"], paths["workspace_path"],
                     model="mimo-v2.6-flash", max_output_tokens=256, require_strict_budget=True)
             self.assertFalse(log.exists())
+
+    def test_json_mode_preserves_default_config_and_requires_exact_request_format(self):
+        default, disabled, enabled = build_native_config(), build_native_config(json_mode=False), build_native_config(json_mode=True)
+        self.assertEqual(json.dumps(default), json.dumps(disabled))
+        extra = enabled["agents"]["defaults"]["models"]["xiaomi-token-plan/mimo-v2.6-flash"]["params"]["extraBody"]
+        self.assertEqual(extra.pop("response_format"), {"type": "json_object"})
+        self.assertEqual(json.dumps(enabled), json.dumps(default))
+        self.assertNotIn("tool_choice", extra)
+        with tempfile.TemporaryDirectory() as tmp:
+            transport, log, paths = self.setup_cli(Path(tmp), json_mode=True)
+            self.assertEqual(transport.budget_contract["response_format_configured"], "json_object")
+            for changes in ({}, {"response_format": None}, {"response_format": {"type": "text"}},
+                            {"response_format": {"type": "json_object", "strict": True}}):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    self.request(transport, **changes)
+                self.assertFalse(log.exists())
+            reply = self.request(transport, response_format={"type": "json_object"})
+            self.assertEqual(reply["native_openclaw"]["native_budget_contract"]["response_format_configured"], "json_object")
+            self.assertTrue(log.exists())
+            config = json.loads(paths["config_path"].read_text())
+            self.assertEqual(config["agents"]["defaults"]["models"]["xiaomi-token-plan/mimo-v2.6-flash"]["params"]["extraBody"]["response_format"],
+                             {"type": "json_object"})
+        with tempfile.TemporaryDirectory() as tmp:
+            transport, log, _ = self.setup_cli(Path(tmp))
+            self.assertIsNone(transport.budget_contract["response_format_configured"])
+            for response_format in (None, {"type": "json_object"}, {"type": "text"}):
+                with self.assertRaises(ValueError):
+                    self.request(transport, response_format=response_format)
+                self.assertFalse(log.exists())
+
+    def test_json_mode_pinned_configuration_and_boolean_admission(self):
+        for mode in (False, True):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                transport, log, paths = self.setup_cli(Path(tmp), json_mode=mode)
+                with self.assertRaises(ValueError):
+                    NativeOpenClawTransport(transport.cli_path, paths["config_path"], paths["workspace_path"],
+                        model="mimo-v2.6-flash", max_output_tokens=256, json_mode=not mode)
+                config = json.loads(paths["config_path"].read_text())
+                config["agents"]["defaults"]["models"]["xiaomi-token-plan/mimo-v2.6-flash"]["params"]["extraBody"]["response_format"] = {"type": "json_schema"}
+                paths["config_path"].write_text(json.dumps(config))
+                with self.assertRaises(ValueError):
+                    NativeOpenClawTransport(transport.cli_path, paths["config_path"], paths["workspace_path"],
+                        model="mimo-v2.6-flash", max_output_tokens=256, json_mode=mode)
+                self.assertFalse(log.exists())
+        for mode in (1, "true", None):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, "boolean"):
+                    build_native_config(json_mode=mode)
+                with self.assertRaisesRegex(ValueError, "boolean"):
+                    NativeOpenClawTransport("unused", "unused", "unused", model="mimo-v2.6-flash", json_mode=mode)
+                with self.assertRaisesRegex(ValueError, "boolean"):
+                    NativeOpenClawPool("unused", "unused", "unused", model="mimo-v2.6-flash", json_mode=mode)
+
+    def test_failed_native_envelope_preserves_known_usage_counts_and_safe_status_only(self):
+        sentinel = "FAKE_PRIVATE_DIAGNOSTIC_DO_NOT_EXPOSE"
+        for status in ("timeout", "error", sentinel):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                transport, _, _ = self.setup_cli(Path(tmp), envelope(ok=False, status=status, assistantTurns=7,
+                    toolSummary={"calls": 3, "private": sentinel}, error={"message": sentinel}, final=sentinel),
+                    stderr=sentinel, exit_code=2)
+                with self.assertRaises(NativeOpenClawError) as caught:
+                    self.request(transport)
+                metadata = caught.exception.metadata
+                self.assertEqual(metadata["native_failure_status"], "timeout" if status == "timeout" else "error")
+                self.assertEqual(metadata["assistantTurns"], 7)
+                self.assertEqual(metadata["reported_tool_calls"], 3)
+                self.assertEqual(metadata["provider"], "xiaomi-token-plan")
+                self.assertEqual(metadata["model"], "mimo-v2.6-flash")
+                self.assertEqual(metadata["usage"]["prompt_tokens"], 120)
+                self.assertEqual(metadata["usage"]["completion_tokens"], 20)
+                self.assertEqual(metadata["usage"]["total_tokens"], 140)
+                self.assertEqual(transport.events[-1]["reported_tool_calls"], 3)
+                self.assertNotIn(sentinel, str(caught.exception))
+                self.assertNotIn(sentinel, json.dumps(metadata))
+                self.assertNotIn(sentinel, json.dumps(transport.events))
+
+    def test_failed_native_envelope_omits_invalid_counts_and_unknown_identity(self):
+        for count in (True, -1, "PRIVATE_COUNT", None):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as tmp:
+                transport, _, _ = self.setup_cli(Path(tmp), envelope(ok=False, status="error",
+                    assistantTurns=count, toolSummary={"calls": count},
+                    provider="PRIVATE_PROVIDER", model="PRIVATE_MODEL"), exit_code=1)
+                with self.assertRaises(NativeOpenClawError) as caught:
+                    self.request(transport)
+                metadata = caught.exception.metadata
+                self.assertNotIn("assistantTurns", metadata)
+                self.assertNotIn("reported_tool_calls", metadata)
+                self.assertNotIn("provider", metadata)
+                self.assertNotIn("model", metadata)
+                self.assertNotIn("PRIVATE_", json.dumps(metadata))
+                self.assertEqual(metadata["usage"]["total_tokens"], 140)
+        with tempfile.TemporaryDirectory() as tmp:
+            transport, _, _ = self.setup_cli(Path(tmp), envelope(ok=False, status="timeout",
+                assistantTurns=0, toolSummary={"calls": 0}), exit_code=2)
+            with self.assertRaises(NativeOpenClawError) as caught:
+                self.request(transport)
+            self.assertEqual(caught.exception.metadata["assistantTurns"], 0)
+            self.assertEqual(caught.exception.metadata["reported_tool_calls"], 0)
+
+    def test_pool_passes_explicit_json_mode_to_every_worker(self):
+        created = []
+        class OfflineWorker:
+            def __init__(self, *args, **kwargs):
+                created.append(kwargs)
+                self.budget_contract = {"response_format_configured": "json_object" if kwargs["json_mode"] else None}
+        with patch("evaluation.openclaw_transport.NativeOpenClawTransport", OfflineWorker):
+            pool = NativeOpenClawPool("unused", "unused", "unused", model="mimo-v2.6-flash", workers=3, json_mode=True)
+        self.assertEqual([worker["json_mode"] for worker in created], [True, True, True])
+        self.assertEqual(pool.budget_contract["response_format_configured"], "json_object")
 
     def test_secret_free_config_matches_v2_schema_locations(self):
         config = build_native_config()

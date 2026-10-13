@@ -121,8 +121,10 @@ def convert_native_usage(value):
 def build_native_config(*, provider="xiaomi-token-plan", model="mimo-v2.6-flash",
                         base_url="https://token-plan-ams.xiaomimimo.com/v1",
                         profile_id="xiaomi-token-plan:default", max_input_tokens=131072,
-                        max_output_tokens=1024, temperature=.3):
+                        max_output_tokens=1024, temperature=.3, json_mode=False):
     """Pure secret-free pinned config. Existing login is resolved by OpenClaw."""
+    if not isinstance(json_mode, bool):
+        raise ValueError("json_mode must be a boolean")
     for name, value in (("max_input_tokens", max_input_tokens), ("max_output_tokens", max_output_tokens)):
         if not _integer(value) or value < 1:
             raise ValueError(f"{name} must be a positive integer")
@@ -131,7 +133,7 @@ def build_native_config(*, provider="xiaomi-token-plan", model="mimo-v2.6-flash"
     if provider != "xiaomi-token-plan" or not model.strip() or not profile_id.startswith(provider + ":"):
         raise ValueError("This native configuration targets an explicit Xiaomi Token Plan model/profile")
     reference = provider + "/" + model
-    return {"agents": {"defaults": {
+    config = {"agents": {"defaults": {
         "systemAgent": {"agentId": "main"},
         "model": {"primary": reference, "fallbacks": []},
         "models": {reference: {"agentRuntime": {"id": "openclaw"},
@@ -150,6 +152,9 @@ def build_native_config(*, provider="xiaomi-token-plan", model="mimo-v2.6-flash"
         "tools": {"profile": "minimal", "deny": ["*"], "codeMode": {"enabled": False}},
         "plugins": {"allow": ["xiaomi"], "entries": {"xiaomi": {"enabled": True}}},
         "skills": {"allowBundled": [], "load": {"watch": False}}}
+    if json_mode:
+        config["agents"]["defaults"]["models"][reference]["params"]["extraBody"]["response_format"] = {"type": "json_object"}
+    return config
 
 
 NATIVE_PROJECT_SETTINGS = {"retry": {"enabled": False, "maxRetries": 0,
@@ -176,11 +181,11 @@ def prepare_native_workspace(directory: Path, **config_options):
     return {"config_path": config_path, "workspace_path": workspace}
 
 
-def _validate_config(config, *, provider, model, max_input_tokens, max_output_tokens):
+def _validate_config(config, *, provider, model, max_input_tokens, max_output_tokens, json_mode=False):
     expected = build_native_config(provider=provider, model=model,
         base_url=config.get("models", {}).get("providers", {}).get(provider, {}).get("baseUrl", ""),
         profile_id=provider + ":default", max_input_tokens=max_input_tokens,
-        max_output_tokens=max_output_tokens,
+        max_output_tokens=max_output_tokens, json_mode=json_mode,
         temperature=config.get("agents", {}).get("defaults", {}).get("models", {}).get(provider + "/" + model, {}).get("params", {}).get("temperature", .3))
     checked = deepcopy(config)
     definitions = checked.get("models", {}).get("providers", {}).get(provider, {}).get("models", [])
@@ -213,7 +218,11 @@ class NativeOpenClawTransport:
 
     def __init__(self, cli_path, config_path, workspace_path, *, model, provider="xiaomi-token-plan",
                  max_input_tokens=131072, max_output_tokens=1024, base_url=None,
-                 require_strict_budget=False, warm_worker=False, node_path=None, worker_path=None):
+                 require_strict_budget=False, warm_worker=False, node_path=None, worker_path=None,
+                 json_mode=False):
+        if not isinstance(json_mode, bool):
+            raise ValueError("json_mode must be a boolean")
+        self.json_mode = json_mode
         self.cli_path = Path(cli_path).resolve()
         self.config_path = Path(config_path).resolve()
         self.workspace_path = Path(workspace_path).resolve()
@@ -226,7 +235,8 @@ class NativeOpenClawTransport:
         raw_config = self.config_path.read_bytes()
         config = json.loads(raw_config)
         _validate_config(config, provider=provider, model=self.model,
-                         max_input_tokens=max_input_tokens, max_output_tokens=max_output_tokens)
+                         max_input_tokens=max_input_tokens, max_output_tokens=max_output_tokens,
+                         json_mode=json_mode)
         self.config_sha256 = sha256(raw_config).hexdigest()
         self.settings_path = self.workspace_path / ".openclaw/settings.json"
         if not self.settings_path.is_file() or json.loads(self.settings_path.read_text()) != NATIVE_PROJECT_SETTINGS:
@@ -240,6 +250,7 @@ class NativeOpenClawTransport:
             "output_cap_configured": max_output_tokens, "max_provider_attempts": None,
             "adapter_retries": 0, "native_project_retry_disabled": True,
             "sampling_temperature_configured": self.temperature,
+            "response_format_configured": "json_object" if json_mode else None,
             "guarantee": "native wrapper overhead and lower-level attempts are not independently bounded",
             "role_fidelity": "messages serialized inside a native user prompt; native system policy remains"}
         if require_strict_budget:
@@ -442,6 +453,9 @@ class NativeOpenClawTransport:
             raise ValueError("Request output cap differs from the pinned native cap")
         if payload.get("temperature") != self.temperature:
             raise ValueError("Request temperature differs from the pinned native sampling setting")
+        if (self.json_mode and payload.get("response_format") != {"type": "json_object"}) or (
+                not self.json_mode and "response_format" in payload):
+            raise ValueError("Request response format differs from the explicitly selected native JSON mode")
         if url != self.base_url.rstrip("/") + "/chat/completions":
             raise ValueError("Request endpoint differs from the explicit native provider")
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
@@ -487,6 +501,16 @@ class NativeOpenClawTransport:
         if native_evidence:
             metadata["native_evidence"] = native_evidence
         if exit_code != 0 or envelope.get("ok") is not True or envelope.get("status") != "ok":
+            # Failed runs can contain several turns and known billed usage.
+            # Preserve only independently safe counters and enum/identity data.
+            metadata["native_failure_status"] = "timeout" if envelope.get("status") == "timeout" else "error"
+            if _integer(envelope.get("assistantTurns")):
+                metadata["assistantTurns"] = envelope["assistantTurns"]
+            failed_summary = envelope.get("toolSummary")
+            if isinstance(failed_summary, dict) and _integer(failed_summary.get("calls")):
+                metadata["reported_tool_calls"] = failed_summary["calls"]
+            if envelope.get("provider") == self.provider and envelope.get("model") == self.model:
+                metadata.update(provider=self.provider, model=self.model)
             self.events.append({**metadata, "status": "failed", "kind": "native-run-error"})
             raise NativeOpenClawError("native-run-error", metadata=metadata)
         if envelope.get("provider") != self.provider or envelope.get("model") != self.model:
@@ -518,13 +542,16 @@ class NativeOpenClawPool:
     def __init__(self, cli_path, config_path, workspace_path, *, workers=3, model,
                  provider="xiaomi-token-plan", max_input_tokens=131072,
                  max_output_tokens=1024, base_url=None, node_path=None,
-                 worker_path=None, require_strict_budget=False):
+                 worker_path=None, require_strict_budget=False, json_mode=False):
         if not isinstance(workers, int) or isinstance(workers, bool) or not 1 <= workers <= 4:
             raise ValueError("Native worker count must be an integer in [1,4]")
+        if not isinstance(json_mode, bool):
+            raise ValueError("json_mode must be a boolean")
         self.workers = [NativeOpenClawTransport(cli_path, config_path, workspace_path,
             model=model, provider=provider, max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens, base_url=base_url, node_path=node_path,
-            worker_path=worker_path, warm_worker=True, require_strict_budget=require_strict_budget)
+            worker_path=worker_path, warm_worker=True, require_strict_budget=require_strict_budget,
+            json_mode=json_mode)
             for _ in range(workers)]
         self.budget_contract = {**deepcopy(self.workers[0].budget_contract),
             "native_worker_count": workers, "maximum_concurrent_native_requests": workers,

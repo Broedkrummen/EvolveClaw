@@ -56,6 +56,7 @@ class ModelConfig:
     quota_cached_input_credits: int | None = None
     quota_output_credits: int | None = None
     execution_backend: str = "direct-http"
+    native_json_mode: bool = False
 
     def validate(self, require_opt_in=True):
         if require_opt_in and self.opt_in is not True:
@@ -64,6 +65,9 @@ class ModelConfig:
             raise ValueError("Select openai-compatible, anthropic, or xiaomi-mimo provider")
         if self.execution_backend not in ("direct-http", "native-openclaw"):
             raise ValueError("Select direct-http or native-openclaw execution backend")
+        if type(self.native_json_mode) is not bool or (self.native_json_mode and
+                (self.execution_backend != "native-openclaw" or self.provider != "xiaomi-mimo")):
+            raise ValueError("native_json_mode requires the native Xiaomi backend and a boolean flag")
         if not isinstance(self.model, str) or not self.model.strip() or not isinstance(self.api_key_env, str) or not self.api_key_env.strip():
             raise ValueError("An explicit model and API-key environment-variable name are required")
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.api_key_env):
@@ -258,7 +262,8 @@ class BudgetLedger:
                 if call["reserved_quota_credits"] is not None and credits > call["reserved_quota_credits"]:
                     self._breached = True
                     call["provider_limit_violation"] = True
-            # Unknown/failed requests retain the full reservation. Never infer free.
+            # Unknown requests retain the reservation; valid reported usage is
+            # reconciled even when execution failed. Never infer a free request.
             if (self.max_cost_usd is not None and self._accounted() > self.max_cost_usd + 1e-12) or (
                 self.max_total_tokens is not None and self._accounted_tokens > self.max_total_tokens) or (
                 self.max_quota_credits is not None and self._accounted_credits > self.max_quota_credits):
@@ -395,6 +400,8 @@ class BudgetedModel:
                                 "thinking": {"type": "disabled"}})
             else:
                 payload["max_tokens"] = self.config.max_output_tokens
+            if self.config.native_json_mode:
+                payload["response_format"] = {"type": "json_object"}
             url = self.config.base_url.rstrip("/") + "/chat/completions"
         call_id = self.ledger.reserve(self.config.reservation_cost(), {
             "provider": self.config.provider, "model": self.model, "stage": self.stage,
@@ -433,7 +440,25 @@ class BudgetedModel:
             if self.ledger.stop_reason():
                 raise BudgetExceeded("Provider violated the configured usage/reservation contract; later calls are blocked")
             return ModelReply(content, raw)
-        except Exception as exc:
+        except BaseException as exc:
+            # SDK helpers can swallow execution errors and continue reflection.
+            # Fence the shared ledger before propagating any issued-call failure,
+            # including cancellation, rather than waiting for the outer runner.
+            self.ledger.block(self.ledger.stop_reason() or "Model execution failed; later requests are blocked")
+            if self.transport_kind == "native-openclaw":
+                from .openclaw_transport import NativeOpenClawError
+                # Only the approved native adapter's sanitized error type carries
+                # trusted normalized usage. Arbitrary exception metadata cannot
+                # release a reservation. finish() validates all totals/details.
+                if isinstance(exc, NativeOpenClawError) and isinstance(exc.metadata, dict):
+                    usage = exc.metadata.get("usage")
+                    if isinstance(usage, dict):
+                        input_tokens, output_tokens = usage.get("prompt_tokens"), usage.get("completion_tokens")
+                        total_tokens = usage.get("total_tokens")
+                        prompt_details = usage.get("prompt_tokens_details")
+                        completion_details = usage.get("completion_tokens_details")
+                        cached_input_tokens = prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None
+                        reasoning_tokens = completion_details.get("reasoning_tokens") if isinstance(completion_details, dict) else None
             self.ledger.finish(call_id, self.config, input_tokens, output_tokens, error=type(exc).__name__,
                 total_tokens=total_tokens, cached_input_tokens=cached_input_tokens, reasoning_tokens=reasoning_tokens)
             raise

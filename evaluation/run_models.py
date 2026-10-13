@@ -51,12 +51,12 @@ def native_transport_evidence(transport):
     """Allowlisted host provenance only: no model text, headers, or diagnostics."""
     fields = {"native_openclaw", "exit_code", "config_sha256", "status", "kind", "provider", "model",
               "assistantTurns", "reported_tool_calls", "tool_denial_source", "native_usage_status",
-              "elapsed_seconds", "worker_index", "pool_worker_index", "pool_worker_count", "queue_seconds"}
+              "elapsed_seconds", "worker_index", "pool_worker_index", "pool_worker_count", "queue_seconds", "native_failure_status"}
     contract_fields = {"supports_strict_reservation", "native_input_overhead_tokens", "input_limit_configured",
         "output_cap_configured", "max_provider_attempts", "adapter_retries", "native_project_retry_disabled",
         "sampling_temperature_configured", "guarantee", "role_fidelity", "worker_pool_size",
         "independent_workers", "model_requests_parallel", "model_requests_serialized_per_worker",
-        "native_worker_count", "maximum_concurrent_native_requests", "independent_ephemeral_run_state"}
+        "native_worker_count", "maximum_concurrent_native_requests", "independent_ephemeral_run_state", "response_format_configured"}
     worker_fields = {"openclaw_version", "entry_file", "entry_source_sha256", "internal_entry",
                      "persistent_worker", "model_requests_serialized"}
     def scalar(value):
@@ -411,6 +411,7 @@ def evaluation_plan(config, *, split="pilot", conditions=CONDITIONS, repetitions
             "model_configuration": asdict(config),
             "provider_settings": {"output_limit_parameter": "max_completion_tokens" if config.provider == "xiaomi-mimo" else "max_tokens",
                                   "thinking": "disabled" if config.provider == "xiaomi-mimo" else "not-configured",
+                                  "response_format": "json_object" if config.native_json_mode else None,
                                   "quota_off_peak_discount_applied": False,
                                   "currency_pricing_status": "unknown" if config.input_usd_per_million is None else "explicit-configured-rates"},
             "baseline_commit": HISTORICAL_V02_COMMIT,
@@ -715,6 +716,7 @@ def main(argv=None):
     parser.add_argument("--openclaw-workspace", type=Path)
     parser.add_argument("--openclaw-provider", default="xiaomi-token-plan")
     parser.add_argument("--openclaw-warm-worker", action="store_true", help="Reuse pinned native imports in a sequential worker")
+    parser.add_argument("--native-json-mode", action="store_true", help="Explicit native MiMo JSON output; record as a distinct inference setting")
     parser.add_argument("--node-path", "--openclaw-node", dest="node_path", type=Path, help="Explicit installed Node executable for the warm native worker")
     parser.add_argument("--openclaw-workers", type=int, choices=range(1, 5), default=1)
     parser.add_argument("--openclaw-worker-path", type=Path)
@@ -754,7 +756,8 @@ def main(argv=None):
                          max_total_tokens=args.max_total_tokens, max_quota_credits=args.max_quota_credits,
                          quota_uncached_input_credits=args.quota_uncached_input_credits,
                          quota_cached_input_credits=args.quota_cached_input_credits,
-                         quota_output_credits=args.quota_output_credits, execution_backend=args.execution_backend)
+                         quota_output_credits=args.quota_output_credits, execution_backend=args.execution_backend,
+                         native_json_mode=args.native_json_mode)
     options = dict(split=args.split, conditions=tuple(args.conditions), repetitions=args.repetitions,
                    sequence_limit=args.sequence_limit, sequence_ids=args.sequence_ids)
     if args.execute:
@@ -764,7 +767,7 @@ def main(argv=None):
             native_options = dict(model=args.model, provider=args.openclaw_provider, base_url=args.base_url,
                 max_input_tokens=args.max_input_tokens, max_output_tokens=args.max_output_tokens,
                 require_strict_budget=args.require_strict_native_budget,
-                node_path=args.node_path, worker_path=args.openclaw_worker_path)
+                node_path=args.node_path, worker_path=args.openclaw_worker_path, json_mode=args.native_json_mode)
             if args.openclaw_workers > 1:
                 from .openclaw_transport import NativeOpenClawPool
                 transport = NativeOpenClawPool(args.openclaw_cli, args.openclaw_config, args.openclaw_workspace,

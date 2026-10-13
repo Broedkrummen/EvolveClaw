@@ -256,6 +256,137 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(model.ledger.snapshot()["reserved_unknown_tokens"], 8320)
         self.assertEqual(model.ledger.snapshot()["accounted_quota_credits"], 844_800)
 
+    def test_swallowed_transport_or_response_failure_blocks_the_next_stage(self):
+        from evaluation.models import BudgetExceeded, BudgetedModel, ModelConfig
+        config = ModelConfig("openai-compatible", "test-model", "https://example.invalid/v1", "EXPLICIT_TEST_KEY",
+            max_input_tokens=8192, max_output_tokens=128, max_total_tokens=40_000, opt_in=True)
+        for failure in ("transport", "response"):
+            with self.subTest(failure=failure):
+                calls = []
+                original = OSError("Injected offline transport failure")
+                async def transport(*args):
+                    calls.append(args)
+                    if failure == "transport":
+                        raise original
+                    return {"choices": [{"message": {"content": None}}],
+                            "usage": {"prompt_tokens": 100, "completion_tokens": 10}}
+                model = BudgetedModel(config, transport=transport)
+                async def swallowed_then_continue():
+                    try:
+                        await model.for_stage("synthesis").generate([{"role": "user", "content": "first"}])
+                    except (OSError, ValueError) as exc:
+                        if failure == "transport":
+                            self.assertIs(exc, original)
+                        # SDK helpers can suppress an error and try another stage.
+                    else:
+                        self.fail("The original execution failure must propagate")
+                    with self.assertRaises(BudgetExceeded):
+                        await model.for_stage("classification").generate([{"role": "user", "content": "next"}])
+                asyncio.run(swallowed_then_continue())
+                usage = model.ledger.snapshot()
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(usage["request_count"], 1)
+                self.assertTrue(usage["blocked_reason"])
+                self.assertEqual(usage["calls"][0]["status"], "failed")
+                self.assertEqual(usage["accounted_total_tokens"], 8320 if failure == "transport" else 110)
+
+    def test_native_failed_known_usage_exceeding_reservation_is_accounted(self):
+        from evaluation.models import BudgetExceeded, BudgetedModel, ModelConfig
+        from evaluation.openclaw_transport import NativeOpenClawError
+        config = ModelConfig("xiaomi-mimo", "mimo-v2.6-flash", "https://token-plan-ams.xiaomimimo.com/v1", "OPENCLAW_MANAGED_AUTH",
+            max_input_tokens=65536, max_output_tokens=2048, max_total_tokens=2_000_000,
+            max_quota_credits=250_000_000, quota_uncached_input_credits=100,
+            quota_cached_input_credits=2, quota_output_credits=200, opt_in=True,
+            execution_backend="native-openclaw")
+        for prompt, output, cached in ((74961, 691, 70080), (76918, 653, 72384)):
+            with self.subTest(prompt=prompt):
+                original = NativeOpenClawError("native-configured-token-limit-exceeded", metadata={
+                    "native_openclaw": True, "usage": {
+                        "prompt_tokens": prompt, "completion_tokens": output, "total_tokens": prompt + output,
+                        "prompt_tokens_details": {"cached_tokens": cached},
+                        "completion_tokens_details": {"reasoning_tokens": 17}}})
+                class Native:
+                    native_openclaw = True
+                    def __init__(self):
+                        self.calls = 0
+                    async def __call__(self, *args):
+                        self.calls += 1
+                        raise original
+                native = Native()
+                model = BudgetedModel(config, transport=native, transport_kind="native-openclaw")
+                with self.assertRaises(NativeOpenClawError) as raised:
+                    asyncio.run(model.generate([{"role": "user", "content": "offline failed call"}]))
+                self.assertIs(raised.exception, original)
+                usage = model.ledger.snapshot()
+                self.assertEqual(usage["known_total_tokens"], prompt + output)
+                self.assertEqual(usage["accounted_total_tokens"], prompt + output)
+                self.assertEqual(usage["reserved_unknown_tokens"], 0)
+                self.assertTrue(usage["provider_limit_violation"])
+                self.assertEqual(usage["accounted_quota_credits"], (prompt - cached) * 100 + cached * 2 + output * 200)
+                call = usage["calls"][0]
+                self.assertEqual(call["status"], "failed")
+                self.assertEqual(call["usage_status"], "actual")
+                self.assertEqual(call["cached_input_tokens"], cached)
+                self.assertEqual(call["reasoning_tokens"], 17)
+                self.assertTrue(call["provider_limit_violation"])
+                self.assertIsNone(usage["accounted_budget_usd"])
+                with self.assertRaises(BudgetExceeded):
+                    asyncio.run(model.for_stage("reflection").generate([{"role": "user", "content": "next"}]))
+                self.assertEqual(native.calls, 1)
+
+    def test_failed_usage_metadata_requires_native_transport_and_error_type(self):
+        from evaluation.models import BudgetedModel, ModelConfig
+        from evaluation.openclaw_transport import NativeOpenClawError
+        config = ModelConfig("openai-compatible", "test-model", "https://example.invalid/v1", "EXPLICIT_TEST_KEY",
+            max_input_tokens=8192, max_output_tokens=128, max_total_tokens=40_000,
+            execution_backend="native-openclaw", opt_in=True)
+        metadata = {"usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11}}
+        for kind in ("offline-native-error", "native-untrusted-error", "native-inconsistent-usage"):
+            with self.subTest(kind=kind):
+                if kind == "native-untrusted-error":
+                    original = RuntimeError("Untrusted metadata")
+                    original.metadata = metadata
+                else:
+                    original = NativeOpenClawError("offline-failure", metadata=metadata if kind != "native-inconsistent-usage" else {
+                        "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 1}})
+                class Transport:
+                    native_openclaw = True
+                    async def __call__(self, *args):
+                        raise original
+                model = BudgetedModel(config, transport=Transport(), transport_kind=(
+                    "offline-mock" if kind == "offline-native-error" else "native-openclaw"))
+                with self.assertRaises(type(original)) as raised:
+                    asyncio.run(model.generate([{"role": "user", "content": "offline failed call"}]))
+                self.assertIs(raised.exception, original)
+                usage = model.ledger.snapshot()
+                self.assertEqual(usage["known_total_tokens"], 0)
+                self.assertEqual(usage["reserved_unknown_tokens"], 8320)
+                self.assertEqual(usage["accounted_total_tokens"], 8320)
+                self.assertTrue(usage["blocked_reason"])
+
+    def test_cancelled_transport_blocks_followup_and_keeps_unknown_reservation(self):
+        from evaluation.models import BudgetExceeded, BudgetedModel, ModelConfig
+        original = asyncio.CancelledError()
+        calls = []
+        async def transport(*args):
+            calls.append(args)
+            raise original
+        config = ModelConfig("openai-compatible", "test-model", "https://example.invalid/v1", "EXPLICIT_TEST_KEY",
+            max_input_tokens=8192, max_output_tokens=128, max_total_tokens=40_000, opt_in=True)
+        model = BudgetedModel(config, transport=transport)
+        async def exercise():
+            with self.assertRaises(asyncio.CancelledError) as raised:
+                await model.generate([{"role": "user", "content": "offline cancelled call"}])
+            self.assertIs(raised.exception, original)
+            with self.assertRaises(BudgetExceeded):
+                await model.generate([{"role": "user", "content": "next"}])
+        asyncio.run(exercise())
+        self.assertEqual(len(calls), 1)
+        usage = model.ledger.snapshot()
+        self.assertEqual(usage["reserved_unknown_tokens"], 8320)
+        self.assertEqual(usage["calls"][0]["status"], "failed")
+        self.assertEqual(usage["calls"][0]["error_type"], "CancelledError")
+
     def test_token_plan_requires_native_auth_and_never_reads_an_env_secret(self):
         from evaluation.models import BudgetedModel, ModelConfig
         from dataclasses import replace
