@@ -1,9 +1,6 @@
 # Simulation evaluation: proposed size and comparison design
 
-Status: offline scaffold started in parallel with the plugin improvements at the
-user's request, 13 October 2026. Larger efficacy comparisons remain a later phase.
-This refines the evaluation approach in the
-[working improvement plan](next-version-plan.md). No paid evaluation has been run.
+Status: isolated real-model MiMo pilots began on 13 October 2026 after the offline scaffold. Four original conditions each passed 3/4 future probes in two families; stopped attempts and a fresh all-five cohort are recorded in [the pilot results](mimo-first-pilot-results.md). Larger efficacy comparisons remain a later phase. This refines the evaluation approach in the [working improvement plan](next-version-plan.md).
 The [literature brief](memory-systems-literature-review.md) motivates
 the mechanisms to compare.
 
@@ -12,19 +9,15 @@ fixtures, independently held scoring keys, paired reports, and an offline pilot.
 Its scripted assistant/memory adapters establish mechanics only, not actual AI
 efficacy. An additional smoke check uses the actual production MemoryStore for
 scope, evidence, history undo, revision fencing, and outcome provenance, without
-model calls. No paid or real-model version comparison has been run.
+model calls. Native MiMo operational comparisons now exercise the actual learning algorithms; they have not established a reliability improvement.
 
 The pilot contains 20 authored sequences in 10 template-family clusters, with
 40 future task probes per condition and 60 sequence runs across three conditions.
 Template variants are grouped; family identifiers do not establish statistical
-independence. Development/held-out manifests reserve 100/500 authoring slots;
-these are clearly marked planned, are not runnable cases, and count as no evidence.
+independence. Development contains 100 authored sequences in 20 families. The 500 held-out slots remain planned, are not runnable cases, and count as no evidence.
 The [configured model runner](../evaluation/README.md#real-model-execution-explicit-opt-in-fake-tools-only)
 now wires a bounded fake-tool assistant to actual historical, current, released-SDK,
-and paper-method learning conditions. It has been tested only with injected model
-responses. Native OpenClaw hook integration, independent authoring of the larger
-fixtures, and the selected real-model spending configuration remain separate
-requirements. No benchmark superiority or real-model task quality has been measured.
+and paper-method learning conditions. Offline integration checks and native MiMo pilot attempts are recorded separately. Native plugin integration and a valid broader learning-benefit study remain separate requirements. The operational pilot does not establish benchmark superiority or deployed reliability.
 
 ## Pilot versus evidence
 
@@ -54,8 +47,7 @@ independent families. Structural tests establish reachable tool-backed answers,
 scope changes, rollback cases, and separation from pilot fixtures. They do not
 establish task difficulty or model quality. The 500 held-out slots remain an
 independent authoring and review task. The [MiMo pilot protocol](mimo-pilot-protocol.md)
-records the selected model, native execution, token/credit accounting, and first
-live transport smoke.
+records the selected model, native execution, token/credit accounting, and all live pilot attempts.
 
 ## Why the required size varies
 

@@ -72,9 +72,7 @@ model and a dollar or token budget; subscription experiments also account for
 weighted plan credits. The authored pilot has 20 sequences, and the development
 split has 100 sequences in 20 families with five clustered variants per family.
 The 500 held-out slots still need separate authoring and review. The
-[MiMo pilot protocol](docs/mimo-pilot-protocol.md) records the first live native
-OpenClaw transport smoke; a smoke or scripted result does not establish improved
-task reliability.
+[MiMo pilot protocol](docs/mimo-pilot-protocol.md) records live attempts, protocol changes and usage. The [pilot results](docs/mimo-first-pilot-results.md) preserve completed scores and limitations. Operational pilots and scripted results do not establish improved task reliability.
 
 ## Requirements
 
