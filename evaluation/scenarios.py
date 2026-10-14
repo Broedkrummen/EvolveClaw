@@ -22,6 +22,8 @@ class ToolFixture:
     name: str
     arguments: dict[str, Any]
     result: dict[str, Any]
+    input_schema: dict[str, Any] | None = None
+    handler: str | None = None
 
 
 @dataclass(frozen=True)
@@ -37,7 +39,9 @@ class Task:
         # Results are returned only if the assistant calls the advertised tool.
         return {"task_id": self.task_id, "instruction": self.instruction,
                 "scope": self.scope.to_dict(), "topic": self.topic,
-                "tools": [{"name": t.name, "arguments": t.arguments} for t in self.tools]}
+                "tools": [{"name": t.name, "arguments": t.arguments,
+                           **({"input_schema": t.input_schema} if t.input_schema else {})}
+                          for t in self.tools]}
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,7 @@ class ScoringKey:
     required_fields: dict[str, Any]
     metric_tags: tuple[str, ...] = ()
     mistake_key: str | None = None
+    grading: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -96,9 +101,15 @@ class FakeWorld:
         fixture = self._fixtures.get(name)
         if fixture is None:
             raise ValueError(f"Unadvertised simulated tool: {name}")
-        if arguments != fixture.arguments:
+        if fixture.handler == "coding-check":
+            from .coding_tasks import public_code_check
+            result = public_code_check(deepcopy(fixture.result), deepcopy(arguments))
+        elif fixture.handler is not None:
+            raise ValueError(f"Unsupported fixture handler: {fixture.handler}")
+        elif arguments != fixture.arguments:
             raise ValueError(f"Invalid simulated arguments for {name}")
-        result = deepcopy(fixture.result)
+        else:
+            result = deepcopy(fixture.result)
         self.calls.append({"name": name, "arguments": deepcopy(arguments), "result": result})
         return deepcopy(result)
 
@@ -226,17 +237,13 @@ def pilot_sequences():
 
 
 def planned_manifest():
-    """List authored pilot/development cases and reserve held-out authoring slots."""
+    """List authored pilot, development, diagnostic and held-out cases."""
     from .development_scenarios import development_sequences
     rows = [s.manifest_entry() for s in pilot_sequences()]
     rows.extend(s.manifest_entry() for s in development_sequences())
-    for split, families, variants in (("heldout", 500, 1),):
-        for family_number in range(1, families + 1):
-            family = f"{split}-family-{family_number:03d}"
-            for variant in range(1, variants + 1):
-                rows.append({"sequence_id": f"{family}.{variant:02d}", "family_id": family,
-                             "cluster_id": family, "split": split, "category": "pending-authoring",
-                             "fixture_status": "planned", "task_count": None})
+    from .batches import role_sequences
+    for split in ("diagnostic", "heldout"):
+        rows.extend(s.manifest_entry() for s in role_sequences(split))
     return rows
 
 

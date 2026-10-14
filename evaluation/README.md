@@ -45,7 +45,7 @@ In particular, the defaults disable Best-of-N and expose no public task-counter
 or tactical reset API. The reference reports reset as unsupported and preserves
 these limitations rather than repairing the baseline.
 
-## Authored cases and reserved authoring slots
+## Authored cases and task batches
 
 The pilot contains 20 sequences: two variations of each of ten families. Families
 cover failed calendar, email, document, data import, and booking operations;
@@ -54,11 +54,12 @@ and undo of a deliberately wrong learned preference. Each sequence contains an
 initial learning opportunity followed by two fresh probes. A simulated user gives
 ordinary corrections; source updates and scope changes are controlled.
 
-The generated manifest also reserves 100 development and 500 held-out sequences,
-with distinct family/cluster identifiers across splits. These rows are marked
-`fixture_status: planned`, have no executable fixtures, and contribute no results.
-They must be independently authored and reviewed before use. Unique IDs do not
-make examples statistically independent. Cases with shared histories, solution
+Development contains 100 authored sequences in 20 families. The new task-category
+suite adds 50 diagnostic sequences in 25 families and 500 held-out sequences in
+100 separate families, all runnable through `evaluation.run_models`. See
+[task batches](../docs/task-batches.md) for export, selection and limitations.
+Authored fixtures contribute no model-quality evidence until evaluated.
+Unique IDs do not make examples statistically independent. Cases with shared histories, solution
 structures, paraphrases, or templates must share appropriate cluster IDs, and
 cluster assignments may need to be coarser than the pilot's family labels.
 
@@ -70,8 +71,9 @@ python3 -m evaluation manifest --output artifacts/evaluation/authoring-manifest.
 
 Author new `Sequence` fixtures with matching `Task` objects and separately held
 `ScoringKey` objects. Keep held-out task families and their history templates out
-of development. The current command intentionally executes only authored pilot
-fixtures; reserved rows cannot masquerade as 500 evaluated cases.
+of development. The deterministic `evaluation` command runs its pilot scaffold;
+use `evaluation.run_models --split diagnostic|heldout --batch-id ...` for the new
+category fixtures. Planning and fixture export perform no model calls.
 
 ## Boundaries and scoring
 

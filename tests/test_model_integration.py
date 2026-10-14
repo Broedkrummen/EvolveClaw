@@ -81,10 +81,11 @@ class ModelIntegrationTests(unittest.TestCase):
         self.assertEqual(plan["conditions"], list(CONDITIONS))
         self.assertFalse(plan["model_configuration"]["opt_in"])
 
-    def test_heldout_is_planned_and_priced_cli_defaults_to_plan(self):
-        for split in ("heldout",):
-            with self.assertRaisesRegex(ValueError, "no executable fixtures"):
-                evaluation_plan(configuration(), split=split)
+    def test_heldout_is_authored_and_priced_cli_defaults_to_plan(self):
+        plan = evaluation_plan(configuration(), split="heldout")
+        self.assertEqual(plan["sequence_runs"], 2500)
+        self.assertEqual(plan["family_clusters"], 100)
+        self.assertEqual(plan["api_calls"], 0)
         with tempfile.TemporaryDirectory() as tmp, patch("sys.stdout", new_callable=io.StringIO):
             output = Path(tmp) / "plan"
             main(["--provider", "openai-compatible", "--model", "explicit-model",

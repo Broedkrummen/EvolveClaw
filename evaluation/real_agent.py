@@ -159,6 +159,12 @@ class FakeWorldModelAgent:
                                 'to call tools, or {"tool_calls":[],"answer":{}} to return your structured answer.\n')
             public = {**public, "delegated_instruction": instruction, "executing_role": role}
         history = [{"role": "user", "content": json.dumps(public)}]
+        if any(tool.input_schema for tool in task.tools):
+            base_prompt += ("\nFor a tool advertising input_schema, construct your own arguments "
+                "matching that schema (for example, your proposed Python source for code.check). "
+                "The empty arguments object is a placeholder, not a required literal call. "
+                "Tools without input_schema still require the exact advertised arguments. "
+                "code.check executes public tests only; final code is graded independently.\n")
         earlier_public_steps = []
         for index in range(maximum):
             prompt = guidance.prompt(role, base_prompt) if guidance else base_prompt

@@ -47,10 +47,10 @@ class EvaluationTests(unittest.TestCase):
     def test_manifest_counts_authorship_and_family_disjointness(self):
         rows = planned_manifest()
         validate_manifest(rows)
-        for split, count in (("pilot", 20), ("development", 100), ("heldout", 500)):
+        for split, count in (("pilot", 20), ("development", 100), ("diagnostic", 50), ("heldout", 500)):
             self.assertEqual(sum(row["split"] == split for row in rows), count)
         self.assertEqual(len({s.cluster_id for s in pilot_sequences()}), 10)
-        self.assertTrue(all(row["fixture_status"] == "planned" for row in rows if row["split"] == "heldout"))
+        self.assertTrue(all(row["fixture_status"] == "authored" for row in rows if row["split"] in ("diagnostic", "heldout")))
         self.assertTrue(all(row["fixture_status"] == "authored" for row in rows if row["split"] == "development"))
         corrupt = [dict(rows[0]), {**rows[0], "sequence_id": "different", "split": "heldout"}]
         with self.assertRaisesRegex(ValueError, "crosses splits"):

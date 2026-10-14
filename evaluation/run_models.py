@@ -374,16 +374,24 @@ def _session(sequence_id, scope):
     return sha256(json.dumps([sequence_id, scope], sort_keys=True).encode()).hexdigest()
 
 
-def selected_sequences(split, sequence_limit=None, sequence_ids=None):
-    if split not in ("pilot", "development", "heldout"):
+def selected_sequences(split, sequence_limit=None, sequence_ids=None, batch_id=None):
+    if split not in ("pilot", "development", "diagnostic", "heldout"):
         raise ValueError("Unknown evaluation split")
     if split == "development":
         from .development_scenarios import development_sequences
         sequences = list(development_sequences())
+    elif split in ("diagnostic", "heldout"):
+        from .batches import role_sequences
+        sequences = role_sequences(split)
     else:
         sequences = [s for s in pilot_sequences() if s.split == split]
     if not sequences:
         raise ValueError(f"{split} has planned authoring slots only; no executable fixtures")
+    if batch_id is not None:
+        if sequence_ids is not None:
+            raise ValueError("Choose batch_id or explicit sequence_ids, not both")
+        from .batches import select_batch
+        sequence_ids = select_batch(batch_id, split)["sequence_ids"]
     if sequence_ids is not None:
         if not sequence_ids or len(set(sequence_ids)) != len(sequence_ids):
             raise ValueError("Select unique nonempty sequence IDs")
@@ -399,19 +407,24 @@ def selected_sequences(split, sequence_limit=None, sequence_ids=None):
     return sequences
 
 
-def evaluation_plan(config, *, split="pilot", conditions=CONDITIONS, repetitions=1, sequence_limit=None, sequence_ids=None):
+def evaluation_plan(config, *, split="pilot", conditions=CONDITIONS, repetitions=1, sequence_limit=None, sequence_ids=None, batch_id=None):
     if not conditions or len(set(conditions)) != len(conditions) or any(c not in CONDITIONS for c in conditions):
         raise ValueError("Select unique supported conditions")
     if isinstance(repetitions, bool) or not isinstance(repetitions, int) or repetitions < 1:
         raise ValueError("repetitions must be a positive integer")
-    sequences = selected_sequences(split, sequence_limit, sequence_ids)
+    sequences = selected_sequences(split, sequence_limit, sequence_ids, batch_id)
     validate_manifest(planned_manifest())
     config.validate(require_opt_in=False)
     public_count = sum(sum(isinstance(e, (Task, Feedback)) for e in s.events) for s in sequences)
+    fixture_digest = sha256(json.dumps([asdict(s) for s in sequences], sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
     return {"schema_version": 1, "mode": "plan", "api_calls": 0,
             "spending_authorized_by_plan": False, "efficacy_evidence": False,
-            "split": split, "conditions": list(conditions), "repetitions": repetitions,
+            "split": split, "batch_id": batch_id,
+            "complete_batch_selection": len(sequences) == 10 if batch_id else None,
+            "conditions": list(conditions), "repetitions": repetitions,
             "sequence_ids": [s.sequence_id for s in sequences],
+            "fixture_sha256": fixture_digest,
             "sequence_runs": len(sequences) * len(conditions) * repetitions,
             "family_clusters": len({s.cluster_id for s in sequences}),
             "assistant_runs_before_tool_continuations": public_count * repetitions *
@@ -431,7 +444,8 @@ def evaluation_plan(config, *, split="pilot", conditions=CONDITIONS, repetitions
             "cost_estimate": {"status": "unknown", "amount": None,
                               "reason": "Learning proposals, continuation steps, and consolidation vary by run"},
             "execution_limits": ["Fake-tool fixture agent; native backend adds OpenClaw model execution, not live task tools",
-                "Pilot/development fixtures are authored; held-out authoring slots remain nonexecutable",
+                "Diagnostic/held-out role tasks are authored synthetic fixtures; category sample sizes and family dependence limit inference",
+                "Coding is constrained Python snippet execution; writing is deterministic content/constraint grading; sources are synthetic snapshots",
                 "Paper K2/N2 and role-step hierarchy with authored executor prompts, not an exact benchmark reproduction",
                 "Paper primary response is preselected efficiency; no gold-answer best-of-perspectives selector",
                 "No evaluator success labels are supplied to any learner"]}
@@ -664,11 +678,11 @@ async def _run_sequence(sequence, condition, directory, model, max_steps):
 
 async def run_model_evaluation(config, output: Path, *, split="pilot", conditions=CONDITIONS,
                                repetitions=1, sequence_limit=None, sequence_ids=None, max_steps=5,
-                               transport=None, offline_mock=False, max_concurrent_sequences=1):
+                               transport=None, offline_mock=False, max_concurrent_sequences=1, batch_id=None):
     """Execution requires opt-in, except explicitly marked injected mock mode."""
     from .models import BudgetedModel
     plan = evaluation_plan(config, split=split, conditions=conditions, repetitions=repetitions,
-                           sequence_limit=sequence_limit, sequence_ids=sequence_ids)
+                           sequence_limit=sequence_limit, sequence_ids=sequence_ids, batch_id=batch_id)
     if offline_mock and transport is None:
         raise ValueError("offline_mock requires an injected transport")
     native = config.execution_backend == "native-openclaw" and getattr(transport, "native_openclaw", False) is True
@@ -687,7 +701,7 @@ async def run_model_evaluation(config, output: Path, *, split="pilot", condition
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     _write(output / "plan.json", plan)
-    sequences = selected_sequences(split, sequence_limit, sequence_ids)
+    sequences = selected_sequences(split, sequence_limit, sequence_ids, batch_id)
     scorer = output / "scorer-only"
     scorer.mkdir()
     _write(scorer / "scoring_keys.json", {sequence.sequence_id: {
@@ -765,6 +779,7 @@ async def run_model_evaluation(config, output: Path, *, split="pilot", condition
                "efficacy_evidence": False, "task_quality_measured": not offline_mock,
                "deployment_efficacy_established": False,
                "sequence_runs": len(results), "repetitions": repetitions,
+               "batch_id": batch_id, "fixture_sha256": plan["fixture_sha256"],
                "family_clusters": len({s.cluster_id for s in sequences}),
                "conditions": _condition_reports(results, conditions, usage),
                "primary_comparison": comparison, "usage": usage,
@@ -809,7 +824,8 @@ def main(argv=None):
     parser.add_argument("--temperature", type=float, default=.3)
     parser.add_argument("--max-steps", type=int, default=5)
     parser.add_argument("--max-concurrent-sequences", type=int, choices=range(1, 5), default=1)
-    parser.add_argument("--split", required=True, choices=("pilot", "development", "heldout"))
+    parser.add_argument("--split", required=True, choices=("pilot", "development", "diagnostic", "heldout"))
+    parser.add_argument("--batch-id", help="Exact authored task-category batch; cannot combine with --sequence-id")
     parser.add_argument("--conditions", nargs="+", choices=CONDITIONS, default=list(CONDITIONS))
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--sequence-limit", type=int)
@@ -839,7 +855,7 @@ def main(argv=None):
                          quota_output_credits=args.quota_output_credits, execution_backend=args.execution_backend,
                          native_json_mode=args.native_json_mode)
     options = dict(split=args.split, conditions=tuple(args.conditions), repetitions=args.repetitions,
-                   sequence_limit=args.sequence_limit, sequence_ids=args.sequence_ids)
+                   sequence_limit=args.sequence_limit, sequence_ids=args.sequence_ids, batch_id=args.batch_id)
     if args.execute:
         transport = None
         if args.execution_backend == "native-openclaw":
