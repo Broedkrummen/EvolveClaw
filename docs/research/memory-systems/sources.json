@@ -1,0 +1,163 @@
+{
+  "research_date": "2026-10-13",
+  "discovery_tool": "Firecrawl",
+  "scope": "Initial bounded literature sprint for the phase after scoped learning",
+  "full_text_retrievals": 16,
+  "targeted_primary_passage_reviews": 6,
+  "sources": [
+    {
+      "title": "MemGPT",
+      "url": "https://arxiv.org/html/2310.08560v2",
+      "coverage": "Full text",
+      "mechanism": "Managed context tiers and explicit movement between them",
+      "relevance": "Context management; distinct from validating learned lessons"
+    },
+    {
+      "title": "A-MEM",
+      "url": "https://arxiv.org/html/2502.12110v11",
+      "coverage": "Full text",
+      "mechanism": "Linked atomic notes and evolving connections",
+      "relevance": "Evidence navigation and relevant retrieval; model-generated links need checking"
+    },
+    {
+      "title": "Mem0",
+      "url": "https://arxiv.org/html/2504.19413v1",
+      "coverage": "Full text",
+      "mechanism": "Extracted fact memory, update decisions, optional graph memory",
+      "relevance": "Useful efficiency baseline; paper, OSS, and hosted product differ"
+    },
+    {
+      "title": "Zep",
+      "url": "https://arxiv.org/html/2501.13956v1",
+      "coverage": "Full text",
+      "mechanism": "Temporal knowledge graphs",
+      "relevance": "Time-aware facts and provenance; greater infrastructure burden"
+    },
+    {
+      "title": "Reflexion",
+      "url": "https://arxiv.org/html/2303.11366v4",
+      "coverage": "Full text",
+      "mechanism": "Verbal feedback for another attempt",
+      "relevance": "Later same-task correction option, currently deferred"
+    },
+    {
+      "title": "ExpeL",
+      "url": "https://arxiv.org/html/2308.10144v3",
+      "coverage": "Full text",
+      "mechanism": "Insights from success/failure contrast plus retrieved episodes",
+      "relevance": "Conditions supporting a lesson and transfer to unseen tasks"
+    },
+    {
+      "title": "Voyager",
+      "url": "https://arxiv.org/html/2305.16291v2",
+      "coverage": "Full text",
+      "mechanism": "Executable skill library with environmental feedback",
+      "relevance": "Future verified procedures; substantial additional scope"
+    },
+    {
+      "title": "Generative Agents",
+      "url": "https://arxiv.org/html/2304.03442v2",
+      "coverage": "Full text",
+      "mechanism": "Evidence-linked reflection and selective retrieval",
+      "relevance": "Source-event pointers; its measured objective is believability"
+    },
+    {
+      "title": "MemoryBank",
+      "url": "https://arxiv.org/html/2305.10250v3",
+      "coverage": "Full text",
+      "mechanism": "Conversation profiles and heuristic forgetting",
+      "relevance": "User-specific memory; recency is not proof of correctness"
+    },
+    {
+      "title": "ACE",
+      "url": "https://arxiv.org/html/2510.04618v3",
+      "coverage": "Full text + focused code",
+      "mechanism": "Stable playbook IDs, counters, and localized deltas",
+      "relevance": "Auditable rule changes without rewriting the entire store"
+    },
+    {
+      "title": "MemRL",
+      "url": "https://arxiv.org/html/2601.03192v2",
+      "coverage": "Full text + focused code",
+      "mechanism": "Relevance filtering followed by reward-based utility ranking",
+      "relevance": "Retrieve advice by observed usefulness as well as similarity"
+    },
+    {
+      "title": "Live-Evo",
+      "url": "https://arxiv.org/html/2602.02369v1",
+      "coverage": "Full text",
+      "mechanism": "Memory-on/off outcome contrast before write-back",
+      "relevance": "Candidate-promotion experiment in replayable tasks"
+    },
+    {
+      "title": "Useful Memories Become Faulty When Continuously Updated by LLMs",
+      "url": "https://arxiv.org/html/2605.12978v2",
+      "coverage": "Full text",
+      "mechanism": "Negative evidence on repeated consolidation",
+      "relevance": "Preserve episodes and test consolidation rather than assuming benefit"
+    },
+    {
+      "title": "TARL",
+      "url": "https://arxiv.org/html/2608.03699v1",
+      "coverage": "Full text",
+      "mechanism": "Executable add/revise/no-op/reject/defer transactions",
+      "relevance": "Precise memory-update semantics and state-transition tests"
+    },
+    {
+      "title": "Dependency-Guided Rollback Repair",
+      "url": "https://arxiv.org/html/2608.10502v1",
+      "coverage": "Full text",
+      "mechanism": "Trace dependencies and selective repair after diagnosed faults",
+      "relevance": "Retire contaminated derived memories while preserving unrelated ones"
+    },
+    {
+      "title": "MemoryLACE",
+      "url": "https://arxiv.org/html/2609.03201v1",
+      "coverage": "Full text",
+      "mechanism": "Local merge, supersession, contradiction, and temporal links",
+      "relevance": "Lightweight lifecycle model instead of a comprehensive graph"
+    },
+    {
+      "title": "LoCoMo",
+      "url": "https://arxiv.org/html/2402.17753v1",
+      "coverage": "Passages + author material",
+      "mechanism": "Long conversation recall",
+      "relevance": "Fact-recall diagnostic; dataset/version differences matter"
+    },
+    {
+      "title": "LongMemEval",
+      "url": "https://arxiv.org/html/2410.10813v2",
+      "coverage": "Passages",
+      "mechanism": "Extraction, temporal reasoning, updates, and abstention",
+      "relevance": "Useful QA suite; does not establish obsolete-memory removal"
+    },
+    {
+      "title": "MemoryArena",
+      "url": "https://arxiv.org/html/2602.16313v1",
+      "coverage": "Passages",
+      "mechanism": "Interdependent shopping, travel, search, and reasoning tasks",
+      "relevance": "Closer to everyday assistant reliability"
+    },
+    {
+      "title": "STALE",
+      "url": "https://arxiv.org/abs/2605.06527",
+      "coverage": "Passages",
+      "mechanism": "Implicit state changes and resistance to stale premises",
+      "relevance": "Changed circumstances must change later recommendations"
+    },
+    {
+      "title": "MINJA",
+      "url": "https://arxiv.org/html/2503.03704v5",
+      "coverage": "Passages",
+      "mechanism": "Query-induced poisoning of persistent agent memory",
+      "relevance": "Test whether untrusted interaction becomes durable guidance"
+    },
+    {
+      "title": "MemoryGraft",
+      "url": "https://arxiv.org/html/2512.16962v1",
+      "coverage": "Passages",
+      "mechanism": "Procedural poisoning through ingested artifacts",
+      "relevance": "Distinguish poison admission, retrieval, and executed behavior"
+    }
+  ]
+}

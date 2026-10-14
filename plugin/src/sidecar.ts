@@ -66,9 +66,9 @@ export class Sidecar {
     const health = await this.client.health();
     if (this.stopping || generation !== this.generation) return;
     if (!health) return;
-    this.compatible = health.protocol_version === 2;
+    this.compatible = health.protocol_version === 3;
     if (!this.compatible) {
-      if (!this.warnedIncompatible) this.api.logger.warn("evolveclaw: incompatible old sidecar; stop it with its own process manager and start the updated server (protocol 2 required)");
+      if (!this.warnedIncompatible) this.api.logger.warn("evolveclaw: incompatible old sidecar; stop it with its own process manager and start the updated server (protocol 3 required)");
       this.warnedIncompatible = true;
       return;
     }
@@ -147,7 +147,8 @@ export class Sidecar {
           cwd: serverDir, stdio: "ignore",
           env: { ...process.env, EVOLVECLAW_HOST: url.hostname === "[::1]" ? "::1" : url.hostname,
             EVOLVECLAW_PORT: url.port || "80", EVOLVECLAW_SCOPE_DATA_DEFAULT: dataPath,
-            ...(this.config.dataPath ? { EVOLVECLAW_SCOPE_DATA: dataPath } : {}) },
+            ...(this.config.dataPath ? { EVOLVECLAW_SCOPE_DATA: dataPath } : {}),
+            ...(this.config.sidecarToken ? { EVOLVECLAW_SIDECAR_TOKEN: this.config.sidecarToken } : {}) },
         });
         this.child.on("error", () => this.api.logger.warn("evolveclaw: sidecar process failed to start"));
         const deadline = Date.now() + 15_000;
