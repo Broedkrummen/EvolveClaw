@@ -5,6 +5,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '26'
@@ -17,4 +19,6 @@ jobs:
       - run: npm run typecheck
       - run: EVOLVECLAW_TEST_PYTHON="$(command -v python)" npm test
       - run: python -m pytest -q
+      - run: npx playwright install chromium --only-shell --with-deps
+      - run: EVOLVECLAW_TEST_PYTHON="$(command -v python)" npm run test:ui
       - run: npm run verify:package

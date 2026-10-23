@@ -5,7 +5,7 @@ An OpenClaw plugin that learns guidelines from completed agent runs using
 session; reusable strategic guidance persists on disk. The next turn receives
 the learned guidance through an additive prompt hook.
 
-Version 0.2.0 repairs compatibility with **OpenClaw 2026.10.2** and preserves
+Version 0.3.0 repairs compatibility with **OpenClaw 2026.10.2** and preserves
 the existing learning pipeline, assistant-specific prompts/domains, both
 injection modes, model configuration, automatic sidecar setup, and statistics.
 It does not implement the paper's parallel perspectives or Best-of-N synthesis.
@@ -16,6 +16,63 @@ appear loaded while conversation hooks were blocked, collect obsolete event
 fields, mix concurrent sessions, or eventually stop accepting guidelines.
 See [the investigation and research assessment](docs/research-assessment.md)
 and [migration details](docs/migration.md).
+
+## Scoped learning and controls (0.3)
+
+Learning stays automatic. Each rule records its evidence, scope, stable ID, and
+change history. SQLite transactions prevent a delayed consolidation from
+overwriting a newer accepted change. Opposite instructions remain distinct.
+
+The host supplies the memory audience and project identities. Everyday tasks
+without a repository use a separate no-project bucket inside their audience.
+Missing audience context produces no learning or injected advice. Older JSON
+rules are preserved as inactive legacy history until an owner assigns a scope.
+Project-spanning promotion requires independently validated evidence in at least
+two projects within the same audience; an agent claiming success is not validation.
+
+Chat controls:
+
+- `/evolveclaw list`, `history`, `detail RULE_ID`, `usage`, `status`, `scopes`, or `legacy`.
+- `/evolveclaw-change pause`, `resume`, `disable RULE_ID`, `restore RULE_ID`,
+  `undo CHANGE_ID`, `assign RULE_ID`, or `promote RULE_ID`.
+
+Commands use the last recorded scope for the conversation and require the host's
+owner/operator authorization. Pause stops new learning and leaves active rules
+available. Disable changes a rule's eligibility. Undo targets a specific recorded
+change; it does not reverse external actions.
+
+The native **EvolveClaw** dashboard shows recorded scope/status filters, rules,
+supporting observations, history/undo, and measured/estimated/unknown usage. It
+uses the same backend operations as chat. Enable OpenClaw's **Settings → Labs →
+Custom plugin UI** when installing the reviewed plugin, and open the authenticated
+Control UI on the same Gateway origin over HTTPS or trusted loopback. Backend
+and chat controls remain available with that lab off. Recorded labels are for
+management; they do not confer current learning authority.
+
+The sidecar defaults to loopback and rejects direct browser-origin requests. For
+a separately managed remote server, require `EVOLVECLAW_SIDECAR_TOKEN` and the
+matching sensitive plugin setting `sidecarToken`; use a protected HTTPS endpoint.
+The plugin starts and stops only its own locally managed Python process.
+
+`maxPromptChars` bounds added guidance (default 12,000 characters). Synthesis,
+classification, and consolidation usage are recorded separately. Dollar costs
+remain unknown until explicit prices are configured. See [migration details](docs/migration.md).
+
+## Experimental evaluation runners
+
+The repository includes an isolated simulated environment, an unmodified
+SCOPE 0.1.3 reference, and an experimental implementation of the paper's
+parallel-perspective/candidate-selection architecture. See
+[evaluation documentation](evaluation/README.md),
+[paper fidelity and limits](docs/scope-paper-implementation.md), and
+[evaluation readiness](docs/evaluation-readiness.md).
+
+Offline tests verify mechanics. Actual quality comparisons require an explicit
+model and a dollar or token budget; subscription experiments also account for
+weighted plan credits. The authored pilot has 20 sequences, and the development
+split has 100 sequences in 20 families with five clustered variants per family.
+The 500 held-out slots still need separate authoring and review. The
+[MiMo pilot protocol](docs/mimo-pilot-protocol.md) records live attempts, protocol changes and usage. The [pilot results](docs/mimo-first-pilot-results.md) preserve completed scores and limitations. Operational pilots and scripted results do not establish improved task reliability.
 
 ## Requirements
 
@@ -31,7 +88,7 @@ and [migration details](docs/migration.md).
 
 ## Install the reviewed source
 
-Use this checkout or a release containing 0.2.0. An existing npm/ClawHub listing
+Use this checkout or a release containing 0.3.0. An existing npm/ClawHub listing
 may still contain the old implementation until a maintainer publishes the update.
 
 ```bash
@@ -59,7 +116,7 @@ sidecar effect to establish that the running Gateway loaded the change.
 
 ```bash
 npm pack --pack-destination /tmp
-openclaw plugins install npm-pack:/tmp/evolveclaw-0.2.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/tmp/evolveclaw-0.3.0.tgz --force --accept-capabilities
 ```
 
 Then apply the same conversation/prompt grants and enablement above. The package
@@ -78,7 +135,7 @@ If a package replacement changes the server directory, set `dataPath` to the
 existing absolute SCOPE data directory or move the backed-up data into stable
 OpenClaw state storage before starting the new sidecar.
 
-The repaired sidecar reports **version 0.4.0, protocol_version 2** at `/health`.
+The repaired sidecar reports **version 0.5.0, protocol_version 3** at `/health`.
 The original detached server reports 0.3.0 without this protocol marker. Stop
 that old process with its existing process manager and start the updated server.
 The plugin identifies an incompatible server and logs a specific restart message;
@@ -86,8 +143,10 @@ it does not terminate a server it did not start.
 
 Existing `server/.env` data-directory settings remain effective. Without an
 explicit data directory, an existing `server/scope_data` is reused; otherwise
-new memory goes under OpenClaw's stable service state directory. The strategic
-memory JSON format is unchanged. Tactical state is temporary and does not migrate.
+new memory goes under OpenClaw's stable service state directory. Version 0.3 imports existing strategic JSON once into scoped SQLite history.
+Unscoped legacy rules remain inactive until an owner assigns their scope. The
+original JSON remains available for backup; scoped exports preserve its format.
+Tactical state remains task-specific.
 
 ## Configuration
 

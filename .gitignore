@@ -43,3 +43,6 @@ logs/
 .pytest_cache/
 artifacts/
 *.tgz
+
+# Browser asset typing
+!plugin/src/assets.d.ts

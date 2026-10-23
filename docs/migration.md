@@ -1,5 +1,62 @@
 # OpenClaw 2 migration and verification
 
+## Version 0.3 scoped learning
+
+Version 0.3 retains the repaired hooks, both injection modes, filtering, synthesis
+configuration/modes, Python service lifecycle, reset, traces, and statistics. It
+adds SQLite transactions, host-audience/project scopes, evidence and stable rule
+IDs, checked change history, pause/resume, disable/restore/undo, usage/outcome
+records, and shared chat/native-dashboard controls.
+
+The new sidecar reports **0.5.0 / protocol 3**. Stop an older separately managed
+sidecar with its own process manager before starting this version. The plugin
+detects incompatible servers and keeps ordinary assistance usable.
+
+Existing `strategic_memory/global_rules.json` imports once as inactive legacy
+history; the original file remains intact. Keep the old data directory and agent
+namespace when upgrading. An owner can inspect legacy history and assign rules
+to a recorded scope using chat or the dashboard. Assignment is revision-checked
+and undoable. Scoped exports retain the former JSON structure; direct sidecar
+HTTP callers now supply audience/project keys and expected mutation revisions.
+
+Learning scope comes only from the current host-prepared audience/project context.
+No-project everyday work stays in its own audience-bound bucket. Unknown audience
+does not learn or receive guidance. Recorded labels are persisted for later owner
+management and never presented as live session authorization. A completed trace
+becomes immutable plugin-owned evidence; reflection does not reuse a released
+OpenClaw invocation guard. A task changing scope mid-run is not synthesized.
+
+Chat commands `/evolveclaw` and `/evolveclaw-change` share the dashboard operations.
+Read/write permissions remain host-enforced; legacy access additionally requires
+owner/admin authority. Pause freezes new learning, retaining eligible existing
+rules. Undo targets memory changes, not external actions. A broader rule can be
+promoted only after validated success evidence in two projects in one audience.
+An agent-run success flag is always an unknown quality outcome.
+
+The native dashboard uses bundled browser assets in the authenticated Gateway
+Control UI. User-installed UI needs the **Custom plugin UI** lab and HTTPS or
+trusted loopback on that Gateway origin. This repository work does not toggle
+the user's live lab or activate the plugin.
+
+Local sidecar requests reject browser origins. A remote separately managed server
+requires an explicit `EVOLVECLAW_SIDECAR_TOKEN` and matching `sidecarToken` plugin
+setting. Preserve any existing `.env` model/data settings. Usage comes from the
+provider where available; optional character estimates and configured rate-based
+costs are labeled estimates. Missing rates never mean free API usage.
+
+Verification includes host typechecking, Node hook/permission/cache regression
+tests, Python scoped-store/concurrency/history/metering tests, native browser
+flows through real shared handlers and the production Python server, and isolated
+OpenClaw package installation. Browser host/authorization fixtures are controlled
+test infrastructure; runtime inspection separately proves registration against
+the actual OpenClaw host. No live activation or paid model call is implied.
+
+The historical repair findings below describe version 0.2. Evaluation sources
+are separate: see [readiness](evaluation-readiness.md) and
+[paper implementation limits](scope-paper-implementation.md).
+
+## Historical compatibility investigation
+
 The original EvolveClaw snapshot is `a9c62516051c4fa6369b1c7b20c07c3371e1901d`.
 The investigated and tested host is OpenClaw 2026.10.2, Node 26.11.1, Python 3.12.
 [OpenClaw 2026.8.1](https://docs.openclaw.ai/releases/2026.8.1) is identified by the

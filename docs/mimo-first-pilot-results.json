@@ -1,0 +1,201 @@
+{
+  "source_commit": "67ebdd579b99e26cb8f50f6558ce513ee835b962",
+  "status": "completed",
+  "conditions": {
+    "improved": {
+      "future": {
+        "count": 3,
+        "denominator": 4,
+        "rate": 0.75
+      },
+      "usage": {
+        "accounted_budget_usd": null,
+        "accounted_quota_credits": 1931596,
+        "accounted_total_tokens": 70600,
+        "assistant_requests": 15,
+        "cost_status": "unknown",
+        "known_total_tokens": 70600,
+        "learning_requests": 6,
+        "requests": 21,
+        "reserved_unknown_tokens": 0,
+        "unknown_usage_requests": 0
+      },
+      "executor_steps": 15,
+      "format_error_steps": 1,
+      "json_decode_error_steps": 1,
+      "top_level_capped_attempts": 0,
+      "accepted_lessons": 2,
+      "future_failure_task_ids": [
+        "pilot.user-preference.01.same-scope"
+      ]
+    },
+    "learning-off": {
+      "future": {
+        "count": 2,
+        "denominator": 4,
+        "rate": 0.5
+      },
+      "usage": {
+        "accounted_budget_usd": null,
+        "accounted_quota_credits": 1708780,
+        "accounted_total_tokens": 65876,
+        "assistant_requests": 20,
+        "cost_status": "unknown",
+        "known_total_tokens": 65876,
+        "learning_requests": 0,
+        "requests": 20,
+        "reserved_unknown_tokens": 0,
+        "unknown_usage_requests": 0
+      },
+      "executor_steps": 20,
+      "format_error_steps": 9,
+      "json_decode_error_steps": 7,
+      "top_level_capped_attempts": 2,
+      "accepted_lessons": 0,
+      "future_failure_task_ids": [
+        "pilot.booking-failure.01.success",
+        "pilot.user-preference.01.same-scope"
+      ]
+    },
+    "repaired-v0.2": {
+      "future": {
+        "count": 3,
+        "denominator": 4,
+        "rate": 0.75
+      },
+      "usage": {
+        "accounted_budget_usd": null,
+        "accounted_quota_credits": 1729592,
+        "accounted_total_tokens": 67446,
+        "assistant_requests": 14,
+        "cost_status": "unknown",
+        "known_total_tokens": 67446,
+        "learning_requests": 6,
+        "requests": 20,
+        "reserved_unknown_tokens": 0,
+        "unknown_usage_requests": 0
+      },
+      "executor_steps": 14,
+      "format_error_steps": 0,
+      "json_decode_error_steps": 0,
+      "top_level_capped_attempts": 0,
+      "accepted_lessons": 2,
+      "future_failure_task_ids": [
+        "pilot.user-preference.01.same-scope"
+      ]
+    },
+    "scope_paper_k2_n2": {
+      "future": {
+        "count": 3,
+        "denominator": 4,
+        "rate": 0.75
+      },
+      "usage": {
+        "accounted_budget_usd": null,
+        "accounted_quota_credits": 42931452,
+        "accounted_total_tokens": 1208846,
+        "assistant_requests": 74,
+        "cost_status": "unknown",
+        "known_total_tokens": 1208846,
+        "learning_requests": 235,
+        "requests": 309,
+        "reserved_unknown_tokens": 0,
+        "unknown_usage_requests": 0
+      },
+      "executor_steps": 74,
+      "format_error_steps": 11,
+      "json_decode_error_steps": 11,
+      "top_level_capped_attempts": 0,
+      "accepted_lessons": 35,
+      "future_failure_task_ids": [
+        "pilot.user-preference.01.same-scope"
+      ]
+    },
+    "scope_sdk_reference": {
+      "future": {
+        "count": 3,
+        "denominator": 4,
+        "rate": 0.75
+      },
+      "usage": {
+        "accounted_budget_usd": null,
+        "accounted_quota_credits": 3754072,
+        "accounted_total_tokens": 113075,
+        "assistant_requests": 14,
+        "cost_status": "unknown",
+        "known_total_tokens": 113075,
+        "learning_requests": 17,
+        "requests": 31,
+        "reserved_unknown_tokens": 0,
+        "unknown_usage_requests": 0
+      },
+      "executor_steps": 14,
+      "format_error_steps": 0,
+      "json_decode_error_steps": 0,
+      "top_level_capped_attempts": 0,
+      "accepted_lessons": 2,
+      "future_failure_task_ids": [
+        "pilot.user-preference.01.same-scope"
+      ]
+    }
+  },
+  "paper_perspectives": {
+    "efficiency": {
+      "correct": 3,
+      "total": 4
+    },
+    "thoroughness": {
+      "correct": 2,
+      "total": 4
+    },
+    "oracle_union": {
+      "correct": 3,
+      "total": 4,
+      "deployable_selection": false
+    }
+  },
+  "hashes": {
+    "summary.json": "1d5c2e8c940ddebf0d5a9171bbd8fd7888ad8aa3f5b28ed9a4906c529bc9f481",
+    "sequence_results.json": "678d4d160e671cecf8f345b28704fa9e80e833521187d595743d0ef87d68e7c7",
+    "native_execution.json": "eb158e69a875cb1f255e22726f89ece0994239debc9b4b2d7ea81f9e1501ee4c",
+    "source-manifest.json": "ac6c83d2bfe2998ec7e88d91177fef3fcea36e5e874cf8743cba666e0c56f248"
+  },
+  "usage": {
+    "accounted_budget_usd": null,
+    "accounted_quota_credits": 52055492,
+    "accounted_total_tokens": 1525843,
+    "actual_usage_calls": 401,
+    "blocked_reason": null,
+    "cost_status": "unknown",
+    "known_total_tokens": 1525843,
+    "max_calls": 2000,
+    "max_cost_usd": null,
+    "max_quota_credits": 127489096,
+    "max_total_tokens": 1789939,
+    "provider_limit_violation": false,
+    "quota_status": "conservative-estimate-and-reserved-no-discount",
+    "request_count": 401,
+    "reserved_unknown_tokens": 0,
+    "unknown_usage_calls": 0
+  },
+  "cumulative": {
+    "known_tokens": 3127648,
+    "accounted_tokens": 3735904,
+    "accounted_credits": 174566396,
+    "requests": 820
+  },
+  "cohort": {
+    "provider": "xiaomi-token-plan",
+    "model": "mimo-v2.6-flash",
+    "host_version": "2026.10.2",
+    "native_json_mode": true,
+    "thinking": "disabled",
+    "temperature": 0.3,
+    "sequence_families": 2,
+    "repetitions": 1,
+    "primary_paper_perspective": "efficiency",
+    "native_provider_attempts": "unknown",
+    "dollar_cost": null,
+    "deployment_efficacy_established": false
+  }
+}

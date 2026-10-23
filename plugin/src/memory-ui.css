@@ -1,0 +1,36 @@
+.evolveclaw {
+  --ec-surface: var(--card, #ffffff); --ec-text: var(--text, #17243a);
+  --ec-muted: var(--muted, #526079); --ec-border: var(--border, #d6deeb);
+  --ec-accent: var(--accent, #2457b8); --ec-danger: var(--destructive, #b42335);
+  color: var(--ec-text); font-family: var(--font-family, system-ui, sans-serif);
+  line-height: 1.6; padding: 1.5rem; max-width: 90rem; margin: auto;
+  scrollbar-color: var(--ec-muted) var(--ec-surface); scrollbar-width: auto;
+}
+.evolveclaw * { box-sizing: border-box; scrollbar-color: var(--ec-muted) var(--ec-surface); }
+.evolveclaw h1 { font-size: 1.8rem; margin: 0; font-weight: 650; }
+.evolveclaw h2 { font-size: 1.1rem; margin: 0 0 1rem; }
+.evolveclaw header p, .ec-note { color: var(--ec-muted); }
+.evolveclaw p { overflow-wrap: anywhere; }
+.ec-toolbar, .ec-actions { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+.ec-scope-picker { min-width: 15rem; flex: 1; }
+.evolveclaw button, .evolveclaw select { min-height: 2.5rem; padding: .5rem .85rem; border: 1px solid var(--ec-border); border-radius: .5rem; background: var(--ec-surface); color: var(--ec-text); font: inherit; cursor: pointer; }
+.evolveclaw button:hover:not(:disabled), .evolveclaw select:hover:not(:disabled) { border-color: var(--ec-accent); background: var(--bg-hover, #eef3fb); }
+.evolveclaw button:active:not(:disabled) { transform: translateY(1px); }
+.evolveclaw button:disabled, .evolveclaw select:disabled { opacity: .55; cursor: not-allowed; }
+.evolveclaw :focus-visible { outline: 3px solid var(--ec-accent); outline-offset: 3px; }
+.ec-legacy { display: flex; align-items: center; gap: .5rem; }
+.ec-status, .ec-error { min-height: 1.6rem; margin: .75rem 0; }
+.ec-error { color: var(--ec-danger); }
+.ec-layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+.ec-panel { background: var(--ec-surface); border: 1px solid var(--ec-border); border-radius: .75rem; padding: 1.25rem; margin-bottom: 1.25rem; }
+.ec-rule, .ec-history, .ec-observation { border-top: 1px solid var(--ec-border); padding: 1rem 0; }
+.ec-rule:first-child, .ec-history:nth-child(2) { border-top: 0; }
+.ec-rule-text { font-weight: 550; }
+.ec-id { display: block; margin-top: .75rem; font-family: ui-monospace, monospace; overflow-wrap: anywhere; color: var(--ec-muted); }
+.ec-history small { display: block; color: var(--ec-muted); margin-bottom: .5rem; }
+.evolveclaw ::-webkit-scrollbar { width: 12px; height: 12px; }
+.evolveclaw ::-webkit-scrollbar-thumb { background: var(--ec-muted); border: 3px solid var(--ec-surface); border-radius: 8px; }
+.evolveclaw ::-webkit-scrollbar-thumb:hover { background: var(--ec-accent); }
+@media (max-width: 800px) { .ec-layout { grid-template-columns: 1fr; } .evolveclaw { padding: .85rem; } .ec-scope-picker { min-width: 0; width: 100%; flex-basis: 100%; } }
+@media (prefers-reduced-motion: reduce) { .evolveclaw button:active:not(:disabled) { transform: none; } }
+@media (forced-colors: active) { .evolveclaw, .evolveclaw * { scrollbar-color: auto; } .evolveclaw :focus-visible { outline-color: Highlight; } }
